@@ -1,0 +1,24 @@
+# Dependencies & build outputs
+/node_modules/
+/dist/
+
+# Dashboard & project tracking (excluded from game repo)
+/dashboard/
+/KPI_DASHBOARD.md
+/scripts/update-dashboard.mjs
+
+# Raw unoptimized source assets & reference photos (runtime uses public/assets/models/)
+/Models/
+/Scenes/
+
+# Agent/workspace tooling & internal docs
+/.agents/
+/docs/
+/tools/
+
+# Environment & OS files
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db

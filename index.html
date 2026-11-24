@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Hà Nội Shipper 3D Retro</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&family=JetBrains+Mono:wght@600;700&family=Playfair+Display:wght@700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231e1915'/%3E%3Crect x='4' y='4' width='56' height='56' rx='11' fill='none' stroke='%23d9a441' stroke-width='4'/%3E%3Cpolygon points='32,14 37,26 50,26 40,34 44,47 32,39 20,47 24,34 14,26 27,26' fill='%23e8a838'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="viewport-outer">
+      <div id="game-viewport">
+        <canvas id="game-canvas"></canvas>
+
+        <!-- Red Peripheral Impact Flash Overlay -->
+        <div id="hud-damage-vignette" class="damage-vignette" aria-hidden="true"></div>
+
+        <!-- Portrait Orientation Prompt for Mobile Devices -->
+        <div id="rotate-overlay" class="rotate-overlay" role="alert">
+          <div class="rotate-card retro-card">
+            <svg class="icon-svg icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="7" y="2" width="10" height="20" rx="2" />
+              <path d="M12 18h.01" />
+            </svg>
+            <h2>Xoay ngang điện thoại</h2>
+            <p>Trò chơi hiển thị tốt nhất ở chế độ màn hình ngang.</p>
+          </div>
+        </div>
+
+        <!-- Top-Right Controls: Menu keeps audio pill; Gameplay keeps compact Pause icon -->
+        <div id="top-controls" class="top-controls">
+          <div id="menu-audio-pill" class="audio-pill">
+            <button
+              id="btn-mute"
+              type="button"
+              class="retro-icon-btn"
+              aria-label="Bật hoặc tắt âm thanh"
+              title="Bật / Tắt âm thanh"
+            >
+              <svg id="icon-vol-on" class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+              </svg>
+              <svg id="icon-vol-off" class="icon-svg hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <line x1="22" y1="9" x2="16" y2="15" />
+                <line x1="16" y1="9" x2="22" y2="15" />
+              </svg>
+            </button>
+            <input
+              id="volume-slider"
+              type="range"
+              min="0"
+              max="100"
+              value="65"
+              aria-label="Âm lượng"
+              title="Điều chỉnh âm lượng"
+            />
+            <span id="volume-label" class="volume-label">65%</span>
+          </div>
+
+          <button
+            id="btn-pause"
+            type="button"
+            class="retro-icon-btn pause-btn hidden"
+            aria-label="Tạm dừng trò chơi"
+            title="Tạm dừng (P / Esc)"
+          >
+            <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="4" width="4" height="16" rx="1" />
+              <rect x="14" y="4" width="4" height="16" rx="1" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Screen: Main Menu -->
+        <section id="screen-menu" class="screen-overlay screen-menu" data-screen="menu">
+          <div class="menu-layout">
+            <div class="menu-panel retro-card">
+              <div class="menu-scroll">
+                <header class="menu-header">
+                  <div class="retro-stamp">PHỐ CỔ HÀ NỘI · LƯỢN PHỐ 3D RETRO</div>
+                  <h1 class="game-title">HÀ NỘI SHIPPER</h1>
+                  <p class="game-subtitle">
+                    Lượn phố nắng vàng, giữ chắc ví tiền qua 3 tuyến đường A → B
+                  </p>
+                </header>
+
+                <div class="selector-section">
+                  <div class="section-label">1. Chọn xe giao hàng</div>
+                  <div class="bike-grid">
+                    <button
+                      type="button"
+                      class="bike-card active"
+                      data-bike="honda"
+                      id="select-bike-honda"
+                      aria-pressed="true"
+                    >
+                      <span class="card-check" aria-hidden="true">
+                        <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </span>
+                      <div class="bike-card-top">
+                        <span class="bike-name">Xe Côn Cổ Điển</span>
+                        <span class="bike-badge">Linh hoạt</span>
+                      </div>
+                      <p class="bike-tagline">Luồn lách phố cổ linh hoạt, vào cua gọn gàng</p>
+                      <div class="stat-rows" id="stats-honda"></div>
+                    </button>
+
+                    <button
+                      type="button"
+                      class="bike-card"
+                      data-bike="vinfast"
+                      id="select-bike-vinfast"
+                      aria-pressed="false"
+                    >
+                      <span class="card-check" aria-hidden="true">
+                        <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </span>
+                      <div class="bike-card-top">
+                        <span class="bike-name">Xe Máy Điện Evo</span>
+                        <span class="bike-badge teal">Tốc độ</span>
+                      </div>
+                      <p class="bike-tagline">Bứt tốc êm ái, tốc độ tối đa vượt trội</p>
+                      <div class="stat-rows" id="stats-vinfast"></div>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="selector-section">
+                  <div class="section-label">2. Chọn mật độ tuyến phố</div>
+                  <div class="diff-grid">
+                    <button
+                      type="button"
+                      class="diff-card"
+                      data-difficulty="easy"
+                      id="select-diff-easy"
+                      aria-pressed="false"
+                    >
+                      <span class="card-check" aria-hidden="true">
+                        <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </span>
+                      <span class="diff-title">Sáng Sớm</span>
+                      <span class="diff-wallet">Ví 500.000&nbsp;đ</span>
+                      <span class="diff-note">Đường thoáng · Phạt nhẹ</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      class="diff-card active"
+                      data-difficulty="medium"
+                      id="select-diff-medium"
+                      aria-pressed="true"
+                    >
+                      <span class="card-check" aria-hidden="true">
+                        <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </span>
+                      <span class="diff-title">Tan Tầm</span>
+                      <span class="diff-wallet">Ví 350.000&nbsp;đ</span>
+                      <span class="diff-note">Cân bằng · Phạt vừa</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      class="diff-card"
+                      data-difficulty="hard"
+                      id="select-diff-hard"
+                      aria-pressed="false"
+                    >
+                      <span class="card-check" aria-hidden="true">
+                        <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      </span>
+                      <span class="diff-title">Cao Điểm</span>
+                      <span class="diff-wallet">Ví 250.000&nbsp;đ</span>
+                      <span class="diff-note">Đông đúc · Phạt nặng</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="menu-actions">
+                <button id="btn-start" type="button" class="retro-cta">
+                  BẮT ĐẦU GIAO HÀNG
+                </button>
+                <div class="controls-legend">
+                  <span><kbd>W</kbd>/<kbd>↑</kbd> Ga</span>
+                  <span><kbd>S</kbd>/<kbd>↓</kbd> Phanh</span>
+                  <span><kbd>A</kbd><kbd>D</kbd> Lách</span>
+                  <span><kbd>Space</kbd> Còi</span>
+                  <span><kbd>P</kbd> Tạm dừng</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="menu-showroom">
+              <div class="showroom-caption">
+                <span class="showroom-pill" id="showroom-bike-name">Xe Côn Cổ Điển</span>
+                <span class="showroom-sub" id="showroom-bike-desc">
+                  Luồn lách phố cổ linh hoạt, vào cua gọn gàng
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Screen: In-Game 3-Zone HUD -->
+        <section id="screen-playing" class="hud-layer hidden" data-screen="playing">
+          <div class="hud-top-row">
+            <!-- Zone 1: Wallet & Semantic Safety Status -->
+            <div class="hud-card hud-wallet">
+              <div class="hud-kicker">
+                <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1" />
+                  <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" />
+                </svg>
+                <span>VÍ SHIPPER</span>
+              </div>
+              <div class="wallet-value-wrap">
+                <div id="hud-wallet-value" class="hud-wallet-amount">350.000 đ</div>
+                <span id="hud-wallet-delta" class="wallet-delta hidden">−75.000 đ</span>
+              </div>
+              <div class="hud-subrow">
+                <span id="hud-combo-badge" class="status-pill clean">An toàn · 0 lỗi</span>
+                <span id="hud-invuln-badge" class="status-pill invuln hidden">
+                  Miễn thương 1,2s
+                </span>
+              </div>
+            </div>
+
+            <!-- Zone 2: Full Unclipped Stage Title & Route A->B Progress -->
+            <div class="hud-card hud-route">
+              <div class="hud-route-header">
+                <span id="hud-stage-badge" class="stage-chip">Bài 1/3</span>
+                <span id="hud-stage-name" class="stage-title">Phố Cổ &amp; Ô Quan Chưởng</span>
+                <span id="hud-distance-text" class="distance-chip">0 / 1.450 m</span>
+              </div>
+              <div class="route-track">
+                <div id="hud-progress-fill" class="route-fill" style="width: 0%"></div>
+                <div id="hud-progress-marker" class="route-marker" style="left: 2%" aria-hidden="true">
+                  <svg class="icon-svg icon-marker" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="5.5" cy="17.5" r="2.5" />
+                    <circle cx="18.5" cy="17.5" r="2.5" />
+                    <path d="M15 6h2l2.5 6.5" />
+                    <path d="M8 17.5h6.5l1.5-5H9.5L7 9H4" />
+                  </svg>
+                </div>
+              </div>
+              <div class="route-endpoints">
+                <span id="hud-from-label">Quán Café Phố Cổ (A)</span>
+                <span id="hud-to-label">Tháp Đồng Hồ Bờ Hồ (B)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Top-Band Toast Queue (never obscures center 25–75% roadway) -->
+          <div id="hud-toast-stack" class="toast-stack" aria-live="polite"></div>
+
+          <!-- Zone 3: Transient Horn Hint (bottom-left, hides after 5s) + Speedometer (bottom-right) -->
+          <div class="hud-bottom-row">
+            <div class="hud-bottom-left">
+              <div id="hud-horn-hint" class="mini-chip horn-hint">
+                <svg class="icon-svg icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                </svg>
+                <span>Nhấn <kbd>Space</kbd> bấm còi</span>
+              </div>
+            </div>
+
+            <div class="hud-card hud-speedo">
+              <div class="speedo-value" id="hud-speed-value">24</div>
+              <div class="speedo-meta">
+                <span class="speedo-unit">KM/H</span>
+                <div class="speedo-bar">
+                  <div id="hud-speed-fill" class="speedo-bar-fill" style="width: 30%"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mobile Touch Controls (shown only on coarse pointer / touch devices) -->
+          <div id="touch-controls" class="touch-controls">
+            <div class="touch-pad-left">
+              <button id="touch-left" type="button" class="touch-btn" aria-label="Lách trái">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+              <button id="touch-right" type="button" class="touch-btn" aria-label="Lách phải">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </button>
+            </div>
+            <div class="touch-pad-right">
+              <button id="touch-horn" type="button" class="touch-btn touch-horn" aria-label="Bấm còi">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                </svg>
+              </button>
+              <button id="touch-brake" type="button" class="touch-btn touch-brake" aria-label="Phanh">
+                <span>PHANH</span>
+              </button>
+              <button id="touch-gas" type="button" class="touch-btn touch-gas" aria-label="Tăng ga">
+                <span>GA</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Screen: Pause Modal (includes Audio, Retro Film Toggle & Confirm Guards) -->
+        <section id="screen-paused" class="screen-overlay modal-backdrop hidden" data-screen="paused">
+          <div class="modal-card retro-card">
+            <div class="retro-stamp">TẠM NGHỈ TRÀ ĐÁ</div>
+            <h2 class="modal-title">TẠM DỪNG</h2>
+            <p id="paused-stage-desc" class="modal-desc">
+              Đang giao hàng tại Bài 1/3 — Phố Cổ &amp; Ô Quan Chưởng
+            </p>
+
+            <div class="pause-settings">
+              <div class="setting-row">
+                <span class="setting-label">Âm lượng nhạc &amp; còi</span>
+                <div class="pause-audio-ctrl">
+                  <button
+                    id="pause-btn-mute"
+                    type="button"
+                    class="retro-icon-btn"
+                    aria-label="Bật hoặc tắt âm thanh"
+                  >
+                    <svg id="pause-icon-vol-on" class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                    </svg>
+                    <svg id="pause-icon-vol-off" class="icon-svg hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                      <line x1="22" y1="9" x2="16" y2="15" />
+                      <line x1="16" y1="9" x2="22" y2="15" />
+                    </svg>
+                  </button>
+                  <input
+                    id="pause-volume-slider"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value="65"
+                    aria-label="Âm lượng trong game"
+                  />
+                  <span id="pause-volume-label" class="volume-label">65%</span>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="setting-label">Hiệu ứng phim Retro</span>
+                <button
+                  id="btn-toggle-retro"
+                  type="button"
+                  class="retro-toggle-btn active"
+                  aria-pressed="true"
+                >
+                  Đang bật
+                </button>
+              </div>
+            </div>
+
+            <div class="modal-actions">
+              <button id="btn-resume" type="button" class="retro-cta">TIẾP TỤC CHẠY</button>
+              <button id="btn-restart-paused" type="button" class="retro-btn secondary">
+                CHƠI LẠI TỪ ĐẦU
+              </button>
+              <button id="btn-menu-paused" type="button" class="retro-btn ghost">
+                VỀ MENU CHÍNH
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Screen: Stage Clear Modal -->
+        <section
+          id="screen-stage-clear"
+          class="screen-overlay modal-backdrop hidden"
+          data-screen="stage_clear"
+        >
+          <div class="modal-card retro-card">
+            <div id="clear-stars" class="star-row" aria-label="Đánh giá chặng"></div>
+            <div id="clear-rank-badge" class="retro-stamp success">GIAO HÀNG ĐÚNG HẸN</div>
+            <h2 id="clear-title" class="modal-title">QUA BÀI 1/3!</h2>
+            <p id="clear-subtitle" class="modal-desc">Đã tới Tháp Đồng Hồ Bờ Hồ (B)</p>
+
+            <div class="ledger-box">
+              <div class="ledger-row">
+                <span>Tiền công tuyến đường</span>
+                <strong id="clear-base-reward">+150.000 đ</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Thưởng chạy sạch</span>
+                <strong id="clear-perfect-bonus">+70.000 đ (0 lỗi)</strong>
+              </div>
+              <div class="ledger-row total">
+                <span>Tổng ví hiện tại</span>
+                <strong id="clear-wallet" class="gold-text">570.000 đ</strong>
+              </div>
+            </div>
+
+            <div class="modal-actions">
+              <button id="btn-next-stage" type="button" class="retro-cta">
+                TIẾP TỤC CHẶNG TIẾP THEO
+              </button>
+              <span class="modal-key-hint">Nhấn <kbd>Enter</kbd> để tiếp tục</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Screen: Game Over Modal -->
+        <section
+          id="screen-game-over"
+          class="screen-overlay modal-backdrop hidden"
+          data-screen="game_over"
+        >
+          <div class="modal-card retro-card danger-card">
+            <div class="retro-stamp danger">VÍ TIỀN ĐÃ CẠN</div>
+            <h2 class="modal-title danger-text">HẾT TIỀN VÍ!</h2>
+            <p id="gameover-desc" class="modal-desc">
+              Ví còn 0 đ sau quá nhiều va chạm trên phố. Hãy bình tĩnh luồn lách lại nhé!
+            </p>
+
+            <div class="ledger-box">
+              <div class="ledger-row">
+                <span>Tuyến đường dừng lại</span>
+                <strong id="gameover-stage">Bài 1/3</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Tiến độ chặng</span>
+                <strong id="gameover-progress">0%</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Tổng số va chạm</span>
+                <strong id="gameover-hits">0 lần</strong>
+              </div>
+              <div class="ledger-row total">
+                <span>Số dư ví</span>
+                <strong class="danger-text">0 đ</strong>
+              </div>
+            </div>
+
+            <div class="modal-actions">
+              <button id="btn-restart-gameover" type="button" class="retro-cta">
+                CHƠI LẠI NGAY
+              </button>
+              <button id="btn-menu-gameover" type="button" class="retro-btn ghost">
+                ĐỔI XE / MẬT ĐỘ PHỐ
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Screen: Victory Modal -->
+        <section
+          id="screen-victory"
+          class="screen-overlay modal-backdrop hidden"
+          data-screen="victory"
+        >
+          <div class="modal-card retro-card victory-card">
+            <div class="retro-stamp success">HUYỀN THOẠI SHIPPER HÀ NỘI</div>
+            <h2 class="modal-title gold-text">HOÀN THÀNH 3 BÀI!</h2>
+            <p class="modal-desc">
+              Bạn đã chinh phục trọn vẹn Phố Cổ, Nhà Hát Lớn và Cầu Vượt Thủ Đô!
+            </p>
+
+            <div class="ledger-box">
+              <div class="ledger-row">
+                <span>Xe &amp; Mật độ phố</span>
+                <strong id="victory-meta">Xe Côn Cổ Điển · Tan Tầm</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Thưởng Bài 3 (+ Chạy sạch)</span>
+                <strong id="victory-last-reward">+220.000 đ</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Tổng va chạm cả tuyến</span>
+                <strong id="victory-hits">0 lần</strong>
+              </div>
+              <div class="ledger-row">
+                <span>Tổng thời gian chạy</span>
+                <strong id="victory-time">00:00</strong>
+              </div>
+              <div class="ledger-row total">
+                <span>Tổng tài sản mang về</span>
+                <strong id="victory-wallet" class="gold-text">800.000 đ</strong>
+              </div>
+            </div>
+
+            <div class="modal-actions">
+              <button id="btn-restart-victory" type="button" class="retro-cta">
+                GIAO CHUYẾN MỚI
+              </button>
+              <button id="btn-menu-victory" type="button" class="retro-btn ghost">
+                VỀ MENU CHÍNH
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

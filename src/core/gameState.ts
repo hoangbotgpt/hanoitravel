@@ -1,0 +1,255 @@
+import {
+  BIKES,
+  STAGES,
+  type BikeId,
+  type DifficultyId,
+  type ObstacleTypeId,
+  type StageSpec
+} from '../config/gameConfig.ts';
+import { applyCollisionPenalty, applyStageReward, createWallet } from './economy.ts';
+import { getRoadProgress } from './roadMath.ts';
+
+export type GameScreen =
+  | 'menu'
+  | 'playing'
+  | 'paused'
+  | 'stage_clear'
+  | 'game_over'
+  | 'victory';
+
+export interface GameSessionState {
+  screen: GameScreen;
+  bikeId: BikeId;
+  difficultyId: DifficultyId;
+  stageIndex: number;
+  stageId: 1 | 2 | 3;
+  wallet: number;
+  distance: number;
+  progress: number;
+  speed: number;
+  hitsInStage: number;
+  totalHits: number;
+  comboSeconds: number;
+  lastPenalty: number;
+  lastObstacleHit: ObstacleTypeId | null;
+  lastStageReward: number;
+  lastPerfectBonus: number;
+  elapsedStageTime: number;
+  totalRunTime: number;
+}
+
+export interface SessionCollisionOutcome {
+  state: GameSessionState;
+  applied: boolean;
+  penalty: number;
+  bankrupt: boolean;
+}
+
+export interface StageCompletionOutcome {
+  state: GameSessionState;
+  completed: boolean;
+  baseReward: number;
+  perfectBonus: number;
+  totalReward: number;
+  isFinalStage: boolean;
+}
+
+/**
+ * Creates a completely clean session state with zero leftover timers, hits, or progress.
+ */
+export function resetSession(
+  bikeId: BikeId,
+  difficultyId: DifficultyId,
+  initialScreen: GameScreen = 'playing'
+): GameSessionState {
+  const firstStage = STAGES[0];
+  const initialSpeed = initialScreen === 'playing' ? BIKES[bikeId].minCruiseSpeed : 0;
+
+  return {
+    screen: initialScreen,
+    bikeId,
+    difficultyId,
+    stageIndex: 0,
+    stageId: firstStage.id,
+    wallet: createWallet(difficultyId),
+    distance: 0,
+    progress: 0,
+    speed: initialSpeed,
+    hitsInStage: 0,
+    totalHits: 0,
+    comboSeconds: 0,
+    lastPenalty: 0,
+    lastObstacleHit: null,
+    lastStageReward: 0,
+    lastPerfectBonus: 0,
+    elapsedStageTime: 0,
+    totalRunTime: 0
+  };
+}
+
+/**
+ * Creates initial menu state before a delivery run starts.
+ */
+export function createInitialGameState(
+  bikeId: BikeId = 'honda',
+  difficultyId: DifficultyId = 'medium'
+): GameSessionState {
+  return resetSession(bikeId, difficultyId, 'menu');
+}
+
+export function getCurrentStageSpec(state: GameSessionState): StageSpec {
+  const safeIdx = Math.max(0, Math.min(STAGES.length - 1, state.stageIndex));
+  return STAGES[safeIdx];
+}
+
+export function startNewGame(
+  bikeId: BikeId,
+  difficultyId: DifficultyId
+): GameSessionState {
+  return resetSession(bikeId, difficultyId, 'playing');
+}
+
+export function returnToMenu(state: GameSessionState): GameSessionState {
+  return resetSession(state.bikeId, state.difficultyId, 'menu');
+}
+
+export function pauseGame(state: GameSessionState): GameSessionState {
+  if (state.screen !== 'playing') return state;
+  return { ...state, screen: 'paused' };
+}
+
+export function resumeGame(state: GameSessionState): GameSessionState {
+  if (state.screen !== 'paused') return state;
+  return { ...state, screen: 'playing' };
+}
+
+export function togglePause(state: GameSessionState): GameSessionState {
+  if (state.screen === 'playing') return pauseGame(state);
+  if (state.screen === 'paused') return resumeGame(state);
+  return state;
+}
+
+export function updateDistanceProgress(
+  state: GameSessionState,
+  distance: number,
+  speed: number,
+  dt: number
+): GameSessionState {
+  if (state.screen !== 'playing') return state;
+
+  const stage = getCurrentStageSpec(state);
+  const clampedDistance = Math.max(0, Math.min(stage.length, distance));
+  const safeDt = Number.isFinite(dt) && dt > 0 ? dt : 0;
+
+  return {
+    ...state,
+    distance: clampedDistance,
+    progress: getRoadProgress(clampedDistance, stage.length),
+    speed: Math.max(0, speed),
+    comboSeconds: state.comboSeconds + safeDt,
+    elapsedStageTime: state.elapsedStageTime + safeDt,
+    totalRunTime: state.totalRunTime + safeDt
+  };
+}
+
+export function applySessionCollision(
+  state: GameSessionState,
+  obstacleType: ObstacleTypeId
+): SessionCollisionOutcome {
+  if (state.screen !== 'playing') {
+    return {
+      state,
+      applied: false,
+      penalty: 0,
+      bankrupt: state.screen === 'game_over'
+    };
+  }
+
+  const result = applyCollisionPenalty(state.wallet, obstacleType, state.difficultyId);
+  const nextScreen: GameScreen = result.bankrupt ? 'game_over' : 'playing';
+
+  return {
+    state: {
+      ...state,
+      screen: nextScreen,
+      wallet: result.wallet,
+      hitsInStage: state.hitsInStage + 1,
+      totalHits: state.totalHits + 1,
+      comboSeconds: 0,
+      lastPenalty: result.penalty,
+      lastObstacleHit: obstacleType,
+      speed: result.bankrupt ? 0 : state.speed
+    },
+    applied: true,
+    penalty: result.penalty,
+    bankrupt: result.bankrupt
+  };
+}
+
+export function completeCurrentStage(
+  state: GameSessionState
+): StageCompletionOutcome {
+  if (state.screen !== 'playing') {
+    return {
+      state,
+      completed: false,
+      baseReward: 0,
+      perfectBonus: 0,
+      totalReward: 0,
+      isFinalStage: false
+    };
+  }
+
+  const stage = getCurrentStageSpec(state);
+  const reward = applyStageReward(
+    state.wallet,
+    stage.id,
+    state.difficultyId,
+    state.hitsInStage
+  );
+  const isFinalStage = state.stageIndex >= STAGES.length - 1;
+
+  return {
+    state: {
+      ...state,
+      screen: isFinalStage ? 'victory' : 'stage_clear',
+      wallet: reward.wallet,
+      distance: stage.length,
+      progress: 1,
+      speed: 0,
+      lastStageReward: reward.baseReward,
+      lastPerfectBonus: reward.perfectBonus
+    },
+    completed: true,
+    baseReward: reward.baseReward,
+    perfectBonus: reward.perfectBonus,
+    totalReward: reward.totalReward,
+    isFinalStage
+  };
+}
+
+export function advanceToNextStage(state: GameSessionState): GameSessionState {
+  if (state.screen !== 'stage_clear') return state;
+  const nextIndex = state.stageIndex + 1;
+  if (nextIndex >= STAGES.length) {
+    return { ...state, screen: 'victory' };
+  }
+
+  const nextStage = STAGES[nextIndex];
+  return {
+    ...state,
+    screen: 'playing',
+    stageIndex: nextIndex,
+    stageId: nextStage.id,
+    distance: 0,
+    progress: 0,
+    speed: BIKES[state.bikeId].minCruiseSpeed,
+    hitsInStage: 0,
+    comboSeconds: 0,
+    lastPenalty: 0,
+    lastObstacleHit: null,
+    lastStageReward: 0,
+    lastPerfectBonus: 0,
+    elapsedStageTime: 0
+  };
+}

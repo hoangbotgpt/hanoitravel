@@ -1,0 +1,27 @@
+{
+  "name": "hanoi-shipper-3d-retro",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173 --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 5173 --host 127.0.0.1",
+    "test": "vitest run",
+    "optimize-models": "node scripts/optimize-models.mjs"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.0.10",
+    "@gltf-transform/extensions": "^4.0.10",
+    "@gltf-transform/functions": "^4.0.10",
+    "@types/three": "^0.170.0",
+    "meshoptimizer": "^0.22.0",
+    "sharp": "^0.33.5",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.5"
+  }
+}
