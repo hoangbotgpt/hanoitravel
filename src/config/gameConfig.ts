@@ -6,10 +6,21 @@ export const LANES = [-4.2, -1.4, 1.4, 4.2] as const;
 export const INVULNERABILITY_SECONDS = 1.2;
 export const PLAYER_HALF_W = 0.48;
 export const PLAYER_HALF_L = 1.05;
+export const TAXI_MODEL_PATH = '/assets/models/vf_e34_taxi.glb';
+export const BUS_MODEL_PATH = '/assets/models/xe_buyt.glb';
+export const TRUCK_MODEL_PATH = '/assets/models/xe_tai_canter.glb';
+export const DRACO_DECODER_PATH = '/assets/draco/';
 
 export type BikeId = 'honda' | 'vinfast';
 export type DifficultyId = 'easy' | 'medium' | 'hard';
-export type ObstacleTypeId = 'motorbike' | 'flower_bike' | 'vendor' | 'car' | 'bus' | 'truck';
+export type ObstacleTypeId =
+  | 'motorbike'
+  | 'flower_bike'
+  | 'vendor'
+  | 'car'
+  | 'taxi'
+  | 'bus'
+  | 'truck';
 export type StageTheme = 'old_quarter' | 'tree_boulevard' | 'overpass_avenue';
 
 export interface BikeSpec {
@@ -161,21 +172,30 @@ export const OBSTACLE_TYPES: Record<ObstacleTypeId, ObstacleTypeSpec> = {
     baseSpeed: 26,
     crossSpeed: 0
   },
+  taxi: {
+    id: 'taxi',
+    label: 'Taxi điện Xanh SM (VF e34)',
+    penalty: 80_000,
+    halfW: 0.86,
+    halfL: 1.78,
+    baseSpeed: 27,
+    crossSpeed: 0
+  },
   bus: {
     id: 'bus',
-    label: 'Xe buýt Hà Nội',
+    label: 'Xe buýt 45 chỗ VinBus',
     penalty: 100_000,
-    halfW: 1.3,
-    halfL: 4.3,
+    halfW: 1.34,
+    halfL: 5.95,
     baseSpeed: 20,
     crossSpeed: 0
   },
   truck: {
     id: 'truck',
-    label: 'Xe tải chở hàng',
+    label: 'Xe tải 1,9 tấn Canter',
     penalty: 95_000,
-    halfW: 1.32,
-    halfL: 3.9,
+    halfW: 1.1,
+    halfL: 3.3,
     baseSpeed: 21,
     crossSpeed: 0
   }
@@ -195,6 +215,7 @@ export interface StageSpec {
   defaultPlayerLane: number;
   roadClassLabel: string;
   trafficDensityScale: number;
+  taxiCountPerStage: 2 | 3;
   allowedObstacles: ObstacleTypeId[];
   obstacleWeights: Partial<Record<ObstacleTypeId, number>>;
   ambientHint: string;
@@ -215,7 +236,8 @@ export const STAGES: StageSpec[] = [
     defaultPlayerLane: 1.8,
     roadClassLabel: 'Đường hẹp Phố Cổ · 2 làn',
     trafficDensityScale: 0.72,
-    allowedObstacles: ['motorbike', 'flower_bike', 'vendor', 'car'],
+    taxiCountPerStage: 2,
+    allowedObstacles: ['motorbike', 'flower_bike', 'vendor', 'car', 'taxi'],
     obstacleWeights: {
       motorbike: 52,
       flower_bike: 24,
@@ -238,7 +260,8 @@ export const STAGES: StageSpec[] = [
     defaultPlayerLane: 1.4,
     roadClassLabel: 'Phố Trung Tâm · 4 làn',
     trafficDensityScale: 1.0,
-    allowedObstacles: ['motorbike', 'flower_bike', 'vendor', 'car', 'bus'],
+    taxiCountPerStage: 3,
+    allowedObstacles: ['motorbike', 'flower_bike', 'vendor', 'car', 'taxi', 'bus'],
     obstacleWeights: {
       motorbike: 38,
       flower_bike: 14,
@@ -262,7 +285,8 @@ export const STAGES: StageSpec[] = [
     defaultPlayerLane: 4.8,
     roadClassLabel: 'Khu Đô Thị Mới · 6 làn',
     trafficDensityScale: 1.55,
-    allowedObstacles: ['car', 'bus', 'truck', 'motorbike'],
+    taxiCountPerStage: 3,
+    allowedObstacles: ['car', 'taxi', 'bus', 'truck', 'motorbike'],
     obstacleWeights: {
       car: 34,
       truck: 26,

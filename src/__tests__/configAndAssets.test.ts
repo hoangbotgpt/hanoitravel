@@ -20,6 +20,9 @@ const ROOT_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const EXPECTED_HONDA_SRC_BYTES = 41612256;
 const EXPECTED_VINFAST_SRC_BYTES = 42196744;
 const EXPECTED_DRIVER_SRC_BYTES = 24440696;
+const EXPECTED_TAXI_SRC_BYTES = 246680;
+const EXPECTED_BUS_SRC_BYTES = 9539644;
+const EXPECTED_TRUCK_SRC_BYTES = 4093104;
 const MAX_OPTIMIZED_MODELS_BYTES = 6 * 1024 * 1024; // 6 MiB gate
 
 describe('gameConfig & asset invariants', () => {
@@ -68,6 +71,9 @@ describe('gameConfig & asset invariants', () => {
       expect(stage.fromLabel.length).toBeGreaterThan(0);
       expect(stage.toLabel.length).toBeGreaterThan(0);
       expect(stage.fromLabel).not.toBe(stage.toLabel);
+      expect(stage.taxiCountPerStage).toBeGreaterThanOrEqual(2);
+      expect(stage.taxiCountPerStage).toBeLessThanOrEqual(3);
+      expect(stage.allowedObstacles).toContain('taxi');
       expect(stage.allowedObstacles.length).toBeGreaterThanOrEqual(4);
       for (const lx of stage.lanes) {
         expect(Math.abs(lx) + PLAYER_HALF_W).toBeLessThan(stage.roadWidth / 2);
@@ -96,12 +102,13 @@ describe('gameConfig & asset invariants', () => {
     }
   });
 
-  it('defines all 6 Hanoi traffic & obstacle types including cargo truck', () => {
+  it('defines all 7 Hanoi traffic & obstacle types including VF e34 taxi and cargo truck', () => {
     expect(Object.keys(OBSTACLE_TYPES).sort()).toEqual([
       'bus',
       'car',
       'flower_bike',
       'motorbike',
+      'taxi',
       'truck',
       'vendor'
     ]);
@@ -113,6 +120,14 @@ describe('gameConfig & asset invariants', () => {
     }
     expect(OBSTACLE_TYPES.vendor.crossSpeed).toBeGreaterThan(0);
     expect(OBSTACLE_TYPES.bus.penalty).toBeGreaterThan(OBSTACLE_TYPES.car.penalty);
+
+    // Strict real-world hierarchy: 45-seat bus > 1.9T truck >> 5-seat taxi, fitting lanes cleanly
+    expect(OBSTACLE_TYPES.bus.halfW).toBeGreaterThan(OBSTACLE_TYPES.truck.halfW);
+    expect(OBSTACLE_TYPES.truck.halfW).toBeGreaterThan(OBSTACLE_TYPES.taxi.halfW);
+    expect(OBSTACLE_TYPES.bus.halfL).toBeGreaterThan(OBSTACLE_TYPES.truck.halfL * 1.5);
+    expect(OBSTACLE_TYPES.truck.halfL).toBeGreaterThan(OBSTACLE_TYPES.taxi.halfL * 1.5);
+    expect(OBSTACLE_TYPES.bus.halfW * 2).toBeLessThan(2.8);
+    expect(OBSTACLE_TYPES.truck.halfW * 2).toBeLessThan(2.5);
   });
 
   it('differentiates Easy, Medium, and Hard difficulty presets consistently', () => {
@@ -139,6 +154,9 @@ describe('gameConfig & asset invariants', () => {
     const hondaSrc = path.join(ROOT_DIR, 'Models', 'honda.glb');
     const vinfastSrc = path.join(ROOT_DIR, 'Models', 'vinfast', 'model.glb');
     const driverSrc = path.join(ROOT_DIR, 'Models', 'driver.glb');
+    const taxiSrc = path.join(ROOT_DIR, 'Models', 'VF_e34_Taxi.glb');
+    const busSrc = path.join(ROOT_DIR, 'Models', 'xe_buyt.glb');
+    const truckSrc = path.join(ROOT_DIR, 'Models', 'xe_tai_canter.glb');
     if (!fs.existsSync(path.join(ROOT_DIR, 'Models'))) {
       return;
     }
@@ -146,29 +164,40 @@ describe('gameConfig & asset invariants', () => {
     expect(fs.existsSync(hondaSrc)).toBe(true);
     expect(fs.existsSync(vinfastSrc)).toBe(true);
     expect(fs.existsSync(driverSrc)).toBe(true);
+    expect(fs.existsSync(taxiSrc)).toBe(true);
+    expect(fs.existsSync(busSrc)).toBe(true);
+    expect(fs.existsSync(truckSrc)).toBe(true);
     expect(fs.statSync(hondaSrc).size).toBe(EXPECTED_HONDA_SRC_BYTES);
     expect(fs.statSync(vinfastSrc).size).toBe(EXPECTED_VINFAST_SRC_BYTES);
     expect(fs.statSync(driverSrc).size).toBe(EXPECTED_DRIVER_SRC_BYTES);
+    expect(fs.statSync(taxiSrc).size).toBe(EXPECTED_TAXI_SRC_BYTES);
+    expect(fs.statSync(busSrc).size).toBe(EXPECTED_BUS_SRC_BYTES);
+    expect(fs.statSync(truckSrc).size).toBe(EXPECTED_TRUCK_SRC_BYTES);
   });
 
-  it('ships optimized Honda, VinFast, and Driver GLBs in public/assets/models/ within <= 6 MB total', () => {
+  it('ships optimized Honda, VinFast, Driver, Taxi, Bus, and Truck GLBs + Draco decoders within <= 6 MB total', () => {
     const modelsDir = path.join(ROOT_DIR, 'public', 'assets', 'models');
-    const hondaOpt = path.join(modelsDir, 'honda.glb');
-    const vinfastOpt = path.join(modelsDir, 'vinfast.glb');
-    const driverOpt = path.join(modelsDir, 'driver.glb');
+    const dracoDir = path.join(ROOT_DIR, 'public', 'assets', 'draco');
+    const modelFiles = [
+      'honda.glb',
+      'vinfast.glb',
+      'driver.glb',
+      'vf_e34_taxi.glb',
+      'xe_buyt.glb',
+      'xe_tai_canter.glb'
+    ];
 
-    expect(fs.existsSync(hondaOpt)).toBe(true);
-    expect(fs.existsSync(vinfastOpt)).toBe(true);
-    expect(fs.existsSync(driverOpt)).toBe(true);
+    expect(fs.existsSync(path.join(dracoDir, 'draco_decoder.wasm'))).toBe(true);
+    expect(fs.existsSync(path.join(dracoDir, 'draco_wasm_wrapper.js'))).toBe(true);
 
-    const hondaSize = fs.statSync(hondaOpt).size;
-    const vinfastSize = fs.statSync(vinfastOpt).size;
-    const driverSize = fs.statSync(driverOpt).size;
-    expect(hondaSize).toBeGreaterThan(1024);
-    expect(vinfastSize).toBeGreaterThan(1024);
-    expect(driverSize).toBeGreaterThan(1024);
-    expect(hondaSize + vinfastSize + driverSize).toBeLessThanOrEqual(
-      MAX_OPTIMIZED_MODELS_BYTES
-    );
+    let totalBytes = 0;
+    for (const filename of modelFiles) {
+      const fullPath = path.join(modelsDir, filename);
+      expect(fs.existsSync(fullPath)).toBe(true);
+      const size = fs.statSync(fullPath).size;
+      expect(size).toBeGreaterThan(1024);
+      totalBytes += size;
+    }
+    expect(totalBytes).toBeLessThanOrEqual(MAX_OPTIMIZED_MODELS_BYTES);
   });
 });

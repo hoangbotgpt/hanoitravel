@@ -31,6 +31,12 @@ import { loadPlayerBike } from '../world/bikeLoader.ts';
 import { CrashEffectsManager } from '../world/crashEffects.ts';
 import { MenuShowroom } from '../world/menuShowroom.ts';
 import { RetroPostPipeline } from '../world/retroPostProcessing.ts';
+import {
+  disposeTrafficLoaderWorkers,
+  loadBusTrafficTemplate,
+  loadTaxiTrafficTemplate,
+  loadTruckTrafficTemplate
+} from '../world/taxiLoader.ts';
 import { HanoiWorldManager } from '../world/worldManager.ts';
 import { AudioManager } from './audioManager.ts';
 import { PlayerController } from './playerController.ts';
@@ -59,6 +65,13 @@ export interface HanoiDebugSnapshot {
   roadWidth: number;
   laneCount: 2 | 4 | 6;
   vehicleCounts: Record<ObstacleTypeId, number>;
+  taxiSpawnedInStage: number;
+  taxiStageQuota: number;
+  taxiGltfLoaded: boolean;
+  busGltfLoaded: boolean;
+  truckGltfLoaded: boolean;
+  renderCalls: number;
+  renderTriangles: number;
   crashPhase: CrashPhase;
   isRecovering: boolean;
   lateralOffset: number;
@@ -85,6 +98,13 @@ export interface HanoiDebugApi {
   readonly roadWidth: number;
   readonly laneCount: 2 | 4 | 6;
   readonly vehicleCounts: Record<ObstacleTypeId, number>;
+  readonly taxiSpawnedInStage: number;
+  readonly taxiStageQuota: number;
+  readonly taxiGltfLoaded: boolean;
+  readonly busGltfLoaded: boolean;
+  readonly truckGltfLoaded: boolean;
+  readonly renderCalls: number;
+  readonly renderTriangles: number;
   readonly crashPhase: CrashPhase;
   readonly isRecovering: boolean;
   advanceToStageEnd: (offsetMetersFromEnd?: number) => HanoiDebugSnapshot;
@@ -269,7 +289,7 @@ export class GameEngine {
   public resizeViewport(): void {
     const w = Math.max(320, window.innerWidth || 1280);
     const h = Math.max(240, window.innerHeight || 720);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
     if (w === this.lastViewportW && h === this.lastViewportH && dpr === this.lastDpr) {
       return;
@@ -297,13 +317,30 @@ export class GameEngine {
     this.worldManager.setMenuLighting(true);
     this.positionMenuCamera();
 
-    // Load both motorbikes + driver in parallel
-    const [hondaGroup, vinfastGroup] = await Promise.all([
-      loadPlayerBike('honda'),
-      loadPlayerBike('vinfast')
-    ]);
-    this.bikeModels.honda = hondaGroup;
-    this.bikeModels.vinfast = vinfastGroup;
+    // Load both motorbikes + driver and traffic GLBs in parallel
+    try {
+      const [hondaGroup, vinfastGroup, taxiTemplate, busTemplate, truckTemplate] =
+        await Promise.all([
+          loadPlayerBike('honda'),
+          loadPlayerBike('vinfast'),
+          loadTaxiTrafficTemplate(),
+          loadBusTrafficTemplate(),
+          loadTruckTrafficTemplate()
+        ]);
+      this.bikeModels.honda = hondaGroup;
+      this.bikeModels.vinfast = vinfastGroup;
+      if (taxiTemplate) {
+        this.trafficSpawner.setTaxiTemplate(taxiTemplate);
+      }
+      if (busTemplate) {
+        this.trafficSpawner.setBusTemplate(busTemplate);
+      }
+      if (truckTemplate) {
+        this.trafficSpawner.setTruckTemplate(truckTemplate);
+      }
+    } finally {
+      disposeTrafficLoaderWorkers();
+    }
 
     this.attachActiveBike(this.state.bikeId);
     if (this.state.screen === 'menu') {
@@ -372,18 +409,25 @@ export class GameEngine {
       document.activeElement.blur();
     }
     const { bikeId, difficultyId } = this.state;
-    this.state = resetSession(bikeId, difficultyId, 'playing');
+    const stageParam = Number(new URLSearchParams(window.location.search).get('stage'));
+    const initialStageId: 1 | 2 | 3 =
+      stageParam === 2 || stageParam === 3 ? stageParam : 1;
+    this.state = {
+      ...resetSession(bikeId, difficultyId, 'playing'),
+      stageIndex: initialStageId - 1,
+      stageId: initialStageId
+    };
     this.cooldown.reset();
     this.crashEffects.clear();
     this.skidSparkAccum = 0;
     this.hud.hidePenaltyToast();
 
-    this.worldManager.buildStage(1);
+    this.worldManager.buildStage(initialStageId);
     this.worldManager.setMenuLighting(false);
     this.showroom.setVisible(false);
     this.attachActiveBike(bikeId);
-    this.playerController.resetForStage(1, this.camera);
-    this.trafficSpawner.reset(1, difficultyId);
+    this.playerController.resetForStage(initialStageId, this.camera);
+    this.trafficSpawner.reset(initialStageId, difficultyId);
     this.displayKmh = Math.round(
       (this.playerController.getPose().speed / BIKES[bikeId].maxSpeed) *
         BIKES[bikeId].displayMaxKmh
@@ -713,6 +757,8 @@ export class GameEngine {
   public getDebugSnapshot(): HanoiDebugSnapshot {
     const stage = getCurrentStageSpec(this.state);
     const dirCounts = this.trafficSpawner.getDirectionCounts();
+    const taxiStats = this.trafficSpawner.getTaxiStageStats();
+    const heavyStats = this.trafficSpawner.getHeavyModelStats();
     return {
       screen: this.state.screen,
       stageId: this.state.stageId,
@@ -736,6 +782,13 @@ export class GameEngine {
       roadWidth: stage.roadWidth,
       laneCount: stage.laneCount,
       vehicleCounts: this.trafficSpawner.getVehicleTypeCounts(),
+      taxiSpawnedInStage: taxiStats.spawnedInStage,
+      taxiStageQuota: taxiStats.quota,
+      taxiGltfLoaded: taxiStats.hasGltfModel,
+      busGltfLoaded: heavyStats.hasBusGltf,
+      truckGltfLoaded: heavyStats.hasTruckGltf,
+      renderCalls: this.renderer.info.render.calls,
+      renderTriangles: this.renderer.info.render.triangles,
       crashPhase: this.playerController.getCrashPhase(),
       isRecovering: this.playerController.isCrashRecovering(),
       lateralOffset: this.playerController.getLateralOffset(),
@@ -796,6 +849,27 @@ export class GameEngine {
       },
       get vehicleCounts() {
         return engine.trafficSpawner.getVehicleTypeCounts();
+      },
+      get taxiSpawnedInStage() {
+        return engine.trafficSpawner.getTaxiStageStats().spawnedInStage;
+      },
+      get taxiStageQuota() {
+        return engine.trafficSpawner.getTaxiStageStats().quota;
+      },
+      get taxiGltfLoaded() {
+        return engine.trafficSpawner.getTaxiStageStats().hasGltfModel;
+      },
+      get busGltfLoaded() {
+        return engine.trafficSpawner.getHeavyModelStats().hasBusGltf;
+      },
+      get truckGltfLoaded() {
+        return engine.trafficSpawner.getHeavyModelStats().hasTruckGltf;
+      },
+      get renderCalls() {
+        return engine.renderer.info.render.calls;
+      },
+      get renderTriangles() {
+        return engine.renderer.info.render.triangles;
       },
       get crashPhase() {
         return engine.playerController.getCrashPhase();

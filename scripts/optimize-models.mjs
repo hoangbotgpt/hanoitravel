@@ -10,8 +10,32 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 
 const OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'models');
+const DRACO_OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'draco');
+const DRACO_SRC_DIR = path.join(
+  ROOT_DIR,
+  'node_modules',
+  'three',
+  'examples',
+  'jsm',
+  'libs',
+  'draco',
+  'gltf'
+);
+const DRACO_FILES = [
+  'draco_decoder.wasm',
+  'draco_wasm_wrapper.js',
+  'draco_decoder.js'
+];
 const MAX_TEXTURE_DIM = 512;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024; // 8 MB hard budget
+
+const PASSTHROUGH_MODELS = [
+  {
+    name: 'vf_e34_taxi',
+    inputRelPath: path.join('Models', 'VF_e34_Taxi.glb'),
+    outputFilename: 'vf_e34_taxi.glb'
+  }
+];
 
 const MODELS = [
   {
@@ -39,6 +63,27 @@ const MODELS = [
     outputFilename: 'driver.glb',
     simplifyRatio: null,
     simplifyError: null
+  },
+  {
+    name: 'xe_buyt',
+    inputRelPath: path.join('Models', 'xe_buyt.glb'),
+    outputFilename: 'xe_buyt.glb',
+    simplifyRatio: 0.1,
+    simplifyError: 0.02,
+    dropNormalMap: true,
+    maxTextureDim: 768,
+    compressMeshopt: true
+  },
+  {
+    name: 'xe_tai_canter',
+    inputRelPath: path.join('Models', 'xe_tai_canter.glb'),
+    outputFilename: 'xe_tai_canter.glb',
+    simplifyRatio: 0.11,
+    simplifyError: 0.03,
+    selectiveMeshSimplify: true,
+    minTrisToSimplify: 2500,
+    preserveMeshPattern: /^(stripe_|lettering|glass|taillight)/i,
+    compressMeshopt: true
   }
 ];
 
@@ -126,13 +171,68 @@ function recomputeSmoothNormals(doc, prim) {
   prim.setAttribute('NORMAL', normAccessor);
 }
 
+async function simplifyHeavyMeshes(doc, MeshoptSimplifier, spec) {
+  const { dedup, prune, weld } = await import('@gltf-transform/functions');
+  await doc.transform(dedup(), weld());
+
+  for (const mesh of doc.getRoot().listMeshes()) {
+    const name = mesh.getName() ?? '';
+    if (spec.preserveMeshPattern?.test(name)) continue;
+
+    let meshTris = 0;
+    for (const prim of mesh.listPrimitives()) {
+      const idx = prim.getIndices();
+      const pos = prim.getAttribute('POSITION');
+      meshTris += idx ? idx.getCount() / 3 : pos ? pos.getCount() / 3 : 0;
+    }
+    if (meshTris < (spec.minTrisToSimplify ?? 0)) continue;
+
+    for (const prim of mesh.listPrimitives()) {
+      const posAttr = prim.getAttribute('POSITION');
+      const idxAttr = prim.getIndices();
+      if (!posAttr || !idxAttr) continue;
+
+      const rawPos = posAttr.getArray();
+      const positions = rawPos instanceof Float32Array ? rawPos : new Float32Array(rawPos);
+      const srcIndices = idxAttr.getArray();
+      const targetCount = Math.max(
+        96,
+        Math.floor((srcIndices.length * spec.simplifyRatio) / 3) * 3
+      );
+      if (targetCount >= srcIndices.length) continue;
+
+      const [dstIndices] = MeshoptSimplifier.simplify(
+        srcIndices,
+        positions,
+        3,
+        targetCount,
+        spec.simplifyError
+      );
+      let maxIdx = 0;
+      for (let i = 0; i < dstIndices.length; i++) {
+        if (dstIndices[i] > maxIdx) maxIdx = dstIndices[i];
+      }
+      idxAttr.setArray(
+        maxIdx <= 65535 ? new Uint16Array(dstIndices) : new Uint32Array(dstIndices)
+      );
+    }
+  }
+
+  await doc.transform(dedup(), prune());
+}
+
 async function runMeshPhase() {
-  const { dedup, prune, simplify, weld } = await import('@gltf-transform/functions');
-  const { MeshoptSimplifier } = await import('meshoptimizer');
-  await MeshoptSimplifier.ready;
+  const { dedup, meshopt, prune, simplify, weld } = await import('@gltf-transform/functions');
+  const { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } = await import('meshoptimizer');
+  await Promise.all([MeshoptSimplifier.ready, MeshoptEncoder.ready, MeshoptDecoder.ready]);
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+  const io = new NodeIO()
+    .registerExtensions(ALL_EXTENSIONS)
+    .registerDependencies({
+      'meshopt.decoder': MeshoptDecoder,
+      'meshopt.encoder': MeshoptEncoder
+    });
   const meshReport = [];
 
   for (const spec of MODELS) {
@@ -154,7 +254,9 @@ async function runMeshPhase() {
       }
     }
 
-    if (spec.simplifyRatio !== null && spec.keepNormals) {
+    if (spec.selectiveMeshSimplify) {
+      await simplifyHeavyMeshes(doc, MeshoptSimplifier, spec);
+    } else if (spec.simplifyRatio !== null && spec.keepNormals) {
       // Keep the authored normals so hard edges stay crisp (no smoothing noise).
       await doc.transform(
         dedup(),
@@ -193,6 +295,10 @@ async function runMeshPhase() {
       await doc.transform(dedup(), weld(), prune());
     }
 
+    if (spec.compressMeshopt) {
+      await doc.transform(meshopt({ encoder: MeshoptEncoder, level: 'medium' }));
+    }
+
     await io.write(tempPath, doc);
 
     const dstTris = countDocumentTriangles(doc);
@@ -205,6 +311,26 @@ async function runMeshPhase() {
     stdio: 'inherit'
   });
 
+  // Copy passthrough Draco-compressed GLBs (preserving PNG alpha decals) & Draco decoders
+  for (const pass of PASSTHROUGH_MODELS) {
+    const srcPath = path.join(ROOT_DIR, pass.inputRelPath);
+    const dstPath = path.join(OUTPUT_DIR, pass.outputFilename);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Missing source passthrough model: ${srcPath}`);
+    }
+    fs.copyFileSync(srcPath, dstPath);
+  }
+
+  fs.mkdirSync(DRACO_OUTPUT_DIR, { recursive: true });
+  for (const filename of DRACO_FILES) {
+    const srcPath = path.join(DRACO_SRC_DIR, filename);
+    const dstPath = path.join(DRACO_OUTPUT_DIR, filename);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Missing Three.js Draco decoder file: ${srcPath}`);
+    }
+    fs.copyFileSync(srcPath, dstPath);
+  }
+
   let totalBytes = 0;
   for (const entry of meshReport) {
     const finalPath = path.join(OUTPUT_DIR, `${entry.name}.glb`);
@@ -216,6 +342,18 @@ async function runMeshPhase() {
       `[optimize-models] ${entry.name}: ${entry.srcTris} -> ${entry.dstTris} tris | ${srcMb} MB -> ${dstKb} KB (${finalPath})`
     );
   }
+  for (const pass of PASSTHROUGH_MODELS) {
+    const finalPath = path.join(OUTPUT_DIR, pass.outputFilename);
+    const dstBytes = fs.statSync(finalPath).size;
+    totalBytes += dstBytes;
+    const dstKb = (dstBytes / 1024).toFixed(1);
+    console.log(
+      `[optimize-models] ${pass.name}: passthrough Draco+PNG (${dstKb} KB -> ${finalPath})`
+    );
+  }
+  console.log(
+    `[optimize-models] Copied ${DRACO_FILES.length} Draco decoder files -> ${DRACO_OUTPUT_DIR}`
+  );
 
   const totalMb = (totalBytes / (1024 * 1024)).toFixed(2);
   console.log(
@@ -231,7 +369,14 @@ async function runMeshPhase() {
 
 async function runTexturesPhase() {
   const { default: sharp } = await import('sharp');
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+  const { MeshoptDecoder, MeshoptEncoder } = await import('meshoptimizer');
+  await Promise.all([MeshoptEncoder.ready, MeshoptDecoder.ready]);
+  const io = new NodeIO()
+    .registerExtensions(ALL_EXTENSIONS)
+    .registerDependencies({
+      'meshopt.decoder': MeshoptDecoder,
+      'meshopt.encoder': MeshoptEncoder
+    });
 
   for (const spec of MODELS) {
     const tempPath = path.join(OUTPUT_DIR, `${spec.name}.mesh.tmp.glb`);

@@ -1,5 +1,11 @@
+import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { LANES, ROAD_WIDTH } from '../config/gameConfig.ts';
+import {
+  LANES,
+  ROAD_WIDTH,
+  STAGES,
+  type DifficultyId
+} from '../config/gameConfig.ts';
 import {
   DEFAULT_CRASH_RIDER,
   IMPACT_TUMBLE_DURATION,
@@ -13,11 +19,16 @@ import {
   stepCrashSequence
 } from '../core/crashSequence.ts';
 import {
+  MAX_TAXIS_PER_STAGE,
+  MIN_TAXIS_PER_STAGE,
   advanceObstacleDistance,
+  buildStageTaxiSchedule,
   computeOncomingSpeed,
   getLaneDirection,
   isOncomingLane
 } from '../core/trafficRules.ts';
+import { TrafficSpawner } from '../gameplay/trafficSpawner.ts';
+import type { TrafficVisualPool } from '../world/trafficModels.ts';
 
 describe('Two-way Hanoi carriageway rules (trafficRules)', () => {
   it('assigns oncoming (-1) to left lanes and forward (+1) to right lanes across 2, 4, and 6 lanes', () => {
@@ -189,5 +200,89 @@ describe('Articulated rider poses during crash (riderPose)', () => {
     expect(seated.riderPose.y).toBeCloseTo(rider.seatY, 1);
     expect(seated.riderRelZ).toBeCloseTo(rider.seatZ, 2);
     expect(seated.riderRelX).toBeCloseTo(0, 2);
+  });
+});
+
+describe('VF e34 Taxi per-stage 2-3 cap (trafficRules & TrafficSpawner)', () => {
+  const createMockPool = (): TrafficVisualPool =>
+    ({
+      acquire: () => new THREE.Group(),
+      release: () => {},
+      setTaxiTemplate: () => {},
+      setBusTemplate: () => {},
+      setTruckTemplate: () => {},
+      hasTaxiTemplate: () => true,
+      hasBusTemplate: () => true,
+      hasTruckTemplate: () => true,
+      dispose: () => {}
+    }) as unknown as TrafficVisualPool;
+
+  it('builds 2-3 taxi encounter slots covering same-direction and oncoming traffic', () => {
+    const low = buildStageTaxiSchedule(1450, 1, () => 0.5);
+    expect(low).toHaveLength(MIN_TAXIS_PER_STAGE);
+
+    const high = buildStageTaxiSchedule(1950, 9, () => 0.5);
+    expect(high).toHaveLength(MAX_TAXIS_PER_STAGE);
+
+    for (const schedule of [low, high]) {
+      for (let i = 0; i < schedule.length; i++) {
+        expect(schedule[i].targetSpawnDist).toBeGreaterThan(0);
+        expect(schedule[i].targetSpawnDist).toBeLessThan(1950 - 30);
+        if (i > 0) {
+          expect(schedule[i].triggerPlayerDist).toBeGreaterThanOrEqual(
+            schedule[i - 1].triggerPlayerDist
+          );
+        }
+      }
+      expect(schedule.some((s) => !s.preferOncoming)).toBe(true);
+      expect(schedule.some((s) => s.preferOncoming)).toBe(true);
+    }
+  });
+
+  it('spawns strictly 2-3 VF e34 taxis per stage across all stages and resets cleanly', () => {
+    const cases: Array<{ stageId: 1 | 2 | 3; difficultyId: DifficultyId }> = [
+      { stageId: 1, difficultyId: 'easy' },
+      { stageId: 1, difficultyId: 'medium' },
+      { stageId: 1, difficultyId: 'hard' },
+      { stageId: 2, difficultyId: 'medium' },
+      { stageId: 3, difficultyId: 'hard' }
+    ];
+
+    const scene = new THREE.Scene();
+    const spawner = new TrafficSpawner(scene, createMockPool());
+
+    for (const testCase of cases) {
+      const stage = STAGES.find((s) => s.id === testCase.stageId)!;
+      spawner.reset(testCase.stageId, testCase.difficultyId);
+
+      const seenTaxiIds = new Set<number>();
+      for (const obs of spawner.getActiveObstacles()) {
+        if (obs.type === 'taxi') seenTaxiIds.add(obs.id);
+      }
+
+      let dist = 0;
+      const dt = 0.05;
+      while (dist < stage.length) {
+        spawner.update(dt, dist);
+        for (const obs of spawner.getActiveObstacles()) {
+          if (obs.type === 'taxi') seenTaxiIds.add(obs.id);
+        }
+        dist += 28 * dt;
+      }
+
+      const stats = spawner.getTaxiStageStats();
+      expect(seenTaxiIds.size).toBe(stage.taxiCountPerStage);
+      expect(stats.spawnedInStage).toBe(stage.taxiCountPerStage);
+      expect(stats.spawnedInStage).toBeGreaterThanOrEqual(MIN_TAXIS_PER_STAGE);
+      expect(stats.spawnedInStage).toBeLessThanOrEqual(MAX_TAXIS_PER_STAGE);
+    }
+
+    // Confirm reset clears stage taxi counter back to initial state
+    spawner.reset(1, 'medium');
+    const resetStats = spawner.getTaxiStageStats();
+    expect(resetStats.quota).toBe(2);
+    expect(resetStats.spawnedInStage).toBe(1);
+
+    spawner.dispose();
   });
 });

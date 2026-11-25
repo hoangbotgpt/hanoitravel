@@ -41,8 +41,9 @@ const OBSTACLE_TOAST_NAME: Record<ObstacleTypeId, string> = {
   flower_bike: 'xe đạp hoa',
   vendor: 'gánh hàng rong',
   car: 'ô tô',
-  bus: 'xe buýt 14',
-  truck: 'xe tải'
+  taxi: 'taxi điện Xanh SM',
+  bus: 'xe buýt VinBus',
+  truck: 'xe tải Canter'
 };
 
 function getRequiredEl<T extends HTMLElement>(id: string): T {

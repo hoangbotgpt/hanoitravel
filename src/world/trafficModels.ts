@@ -44,8 +44,8 @@ function createTaxiRoofTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Shared geometry/material pool for all 5 Hanoi traffic & obstacle types:
- * motorbike, flower_bike, vendor, car, bus.
+ * Shared geometry/material pool for all Hanoi traffic & obstacle types:
+ * motorbike, flower_bike, vendor, car, taxi (VF e34 Xanh SM), bus, truck.
  * Every mesh is grounded at y = 0, centered in X/Z, facing -Z.
  */
 export class TrafficVisualPool {
@@ -54,6 +54,7 @@ export class TrafficVisualPool {
     flower_bike: [],
     vendor: [],
     car: [],
+    taxi: [],
     bus: [],
     truck: []
   };
@@ -61,6 +62,9 @@ export class TrafficVisualPool {
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private readonly mats: Record<string, THREE.Material>;
   private readonly geos: Record<string, THREE.BufferGeometry>;
+  private taxiTemplate: THREE.Group | null = null;
+  private busTemplate: THREE.Group | null = null;
+  private truckTemplate: THREE.Group | null = null;
   private motorbikeColorVariant = 0;
   private carColorVariant = 0;
   private truckVariant = 0;
@@ -165,6 +169,14 @@ export class TrafficVisualPool {
         })
       ),
       taxiRoofSign: track(new THREE.MeshBasicMaterial({ map: taxiSignTex })),
+      xanhSmCyan: track(
+        new THREE.MeshStandardMaterial({
+          color: 0x008076,
+          roughness: 0.22,
+          metalness: 0.24,
+          envMapIntensity: 1.3
+        })
+      ),
       // Bus #14 & Cargo Truck
       busBlue: track(
         new THREE.MeshStandardMaterial({
@@ -256,6 +268,7 @@ export class TrafficVisualPool {
       flower_bike: 5,
       vendor: 4,
       car: 12,
+      taxi: 3,
       bus: 8,
       truck: 8
     };
@@ -264,6 +277,62 @@ export class TrafficVisualPool {
         this.pools[type].push(this.createVisual(type));
       }
     });
+  }
+
+  public hasTaxiTemplate(): boolean {
+    return this.taxiTemplate !== null;
+  }
+
+  public hasBusTemplate(): boolean {
+    return this.busTemplate !== null;
+  }
+
+  public hasTruckTemplate(): boolean {
+    return this.truckTemplate !== null;
+  }
+
+  public setTaxiTemplate(template: THREE.Group): void {
+    this.taxiTemplate = template;
+    this.pools.taxi = [];
+    for (let i = 0; i < 3; i++) {
+      this.pools.taxi.push(this.cloneTaxiFromTemplate(template));
+    }
+  }
+
+  public setBusTemplate(template: THREE.Group): void {
+    this.busTemplate = template;
+    this.pools.bus = [];
+    for (let i = 0; i < 8; i++) {
+      const clone = template.clone(true);
+      clone.userData.isGltfBus = true;
+      this.pools.bus.push(clone);
+    }
+  }
+
+  public setTruckTemplate(template: THREE.Group): void {
+    this.truckTemplate = template;
+    this.pools.truck = [];
+    for (let i = 0; i < 8; i++) {
+      const clone = template.clone(true);
+      clone.userData.isGltfTruck = true;
+      this.pools.truck.push(clone);
+    }
+  }
+
+  private cloneTaxiFromTemplate(template: THREE.Group): THREE.Group {
+    const clone = template.clone(true);
+    const wheelNames = ['Wheel_FL', 'Wheel_FR', 'Wheel_RL', 'Wheel_RR'] as const;
+    const wheels: THREE.Object3D[] = [];
+    for (const name of wheelNames) {
+      const wheel = clone.getObjectByName(name);
+      if (wheel) {
+        wheel.rotation.x = 0;
+        wheels.push(wheel);
+      }
+    }
+    clone.userData.taxiWheels = wheels;
+    clone.userData.isGltfTaxi = true;
+    return clone;
   }
 
   public acquire(type: ObstacleTypeId): THREE.Group {
@@ -289,9 +358,23 @@ export class TrafficVisualPool {
         return this.buildVendor();
       case 'car':
         return this.buildCar();
+      case 'taxi':
+        return this.taxiTemplate
+          ? this.cloneTaxiFromTemplate(this.taxiTemplate)
+          : this.buildTaxiFallback();
       case 'bus':
+        if (this.busTemplate) {
+          const clone = this.busTemplate.clone(true);
+          clone.userData.isGltfBus = true;
+          return clone;
+        }
         return this.buildBus();
       case 'truck':
+        if (this.truckTemplate) {
+          const clone = this.truckTemplate.clone(true);
+          clone.userData.isGltfTruck = true;
+          return clone;
+        }
         return this.buildTruck();
     }
   }
@@ -580,6 +663,51 @@ export class TrafficVisualPool {
     return this.finalizeGroup(g);
   }
 
+  private buildTaxiFallback(): THREE.Group {
+    const g = new THREE.Group();
+    const spec = OBSTACLE_TYPES.taxi; // halfW: 1.02, halfL: 2.08
+    const width = spec.halfW * 1.78;
+    const length = spec.halfL * 1.9;
+
+    for (const sx of [-width * 0.46, width * 0.46]) {
+      for (const sz of [-length * 0.32, length * 0.32]) {
+        const w = new THREE.Mesh(this.geos.carWheel, this.mats.tire);
+        w.position.set(sx, 0.33, sz);
+        g.add(w);
+      }
+    }
+
+    const lowerBody = new THREE.Mesh(this.geos.box, this.mats.xanhSmCyan);
+    lowerBody.scale.set(width, 0.56, length);
+    lowerBody.position.set(0, 0.58, 0);
+    g.add(lowerBody);
+
+    const cabin = new THREE.Mesh(this.geos.box, this.mats.xanhSmCyan);
+    cabin.scale.set(width * 0.84, 0.56, length * 0.54);
+    cabin.position.set(0, 1.12, 0.16);
+    g.add(cabin);
+
+    const glassBand = new THREE.Mesh(this.geos.box, this.mats.glass);
+    glassBand.scale.set(width * 0.86, 0.4, length * 0.5);
+    glassBand.position.set(0, 1.1, 0.16);
+    g.add(glassBand);
+
+    for (const sx of [-width * 0.36, width * 0.36]) {
+      const tail = new THREE.Mesh(this.geos.box, this.mats.tailRed);
+      tail.scale.set(0.32, 0.12, 0.06);
+      tail.position.set(sx, 0.72, length * 0.5 + 0.01);
+      g.add(tail);
+
+      const head = new THREE.Mesh(this.geos.box, this.mats.headLight);
+      head.scale.set(0.34, 0.14, 0.06);
+      head.position.set(sx, 0.68, -length * 0.5 - 0.01);
+      g.add(head);
+    }
+
+    g.userData.isGltfTaxi = false;
+    return this.finalizeGroup(g);
+  }
+
   private buildBus(): THREE.Group {
     const g = new THREE.Group();
     const spec = OBSTACLE_TYPES.bus; // halfW: 1.3, halfL: 4.3
@@ -763,10 +891,47 @@ export class TrafficVisualPool {
     return this.finalizeGroup(g);
   }
 
+  private disposeTemplate(template: THREE.Group | null): void {
+    if (!template) return;
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
+    const texs = new Set<THREE.Texture>();
+    template.traverse((child) => {
+      if (!(child as THREE.Mesh).isMesh) return;
+      const mesh = child as THREE.Mesh;
+      if (mesh.geometry) geos.add(mesh.geometry);
+      const mList = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mList) {
+        if (!m) continue;
+        mats.add(m);
+        const std = m as THREE.MeshStandardMaterial;
+        for (const tex of [
+          std.map,
+          std.normalMap,
+          std.roughnessMap,
+          std.metalnessMap,
+          std.emissiveMap,
+          std.alphaMap
+        ]) {
+          if (tex) texs.add(tex);
+        }
+      }
+    });
+    texs.forEach((t) => t.dispose());
+    mats.forEach((m) => m.dispose());
+    geos.forEach((g) => g.dispose());
+  }
+
   public dispose(): void {
     for (const type of Object.keys(this.pools) as ObstacleTypeId[]) {
       this.pools[type] = [];
     }
+    this.disposeTemplate(this.taxiTemplate);
+    this.taxiTemplate = null;
+    this.disposeTemplate(this.busTemplate);
+    this.busTemplate = null;
+    this.disposeTemplate(this.truckTemplate);
+    this.truckTemplate = null;
     for (const item of this.disposables) {
       item.dispose();
     }

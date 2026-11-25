@@ -19,10 +19,13 @@ import {
 } from '../core/roadMath.ts';
 import {
   advanceObstacleDistance,
+  buildStageTaxiSchedule,
   computeOncomingSpeed,
   getLaneDirection,
+  type TaxiEncounterSlot,
   type TrafficDirection
 } from '../core/trafficRules.ts';
+import { TAXI_WHEEL_RADIUS } from '../world/taxiLoader.ts';
 import { TrafficVisualPool } from '../world/trafficModels.ts';
 import type { PlayerPose } from './playerController.ts';
 
@@ -60,10 +63,25 @@ export class TrafficSpawner {
   private allowedTypes: ObstacleTypeId[] = STAGES[0].allowedObstacles;
   private obstacleWeights: Partial<Record<ObstacleTypeId, number>> = STAGES[0].obstacleWeights;
   private difficultyId: DifficultyId = 'medium';
+  private stageTaxiQuota: 2 | 3 = STAGES[0].taxiCountPerStage;
+  private taxisSpawnedInStage = 0;
+  private taxiSchedule: TaxiEncounterSlot[] = [];
 
   constructor(scene: THREE.Scene, pool?: TrafficVisualPool) {
     this.scene = scene;
     this.pool = pool ?? new TrafficVisualPool();
+  }
+
+  public setTaxiTemplate(template: THREE.Group): void {
+    this.pool.setTaxiTemplate(template);
+  }
+
+  public setBusTemplate(template: THREE.Group): void {
+    this.pool.setBusTemplate(template);
+  }
+
+  public setTruckTemplate(template: THREE.Group): void {
+    this.pool.setTruckTemplate(template);
   }
 
   public reset(stageId: 1 | 2 | 3, difficultyId: DifficultyId): void {
@@ -77,6 +95,12 @@ export class TrafficSpawner {
     this.allowedTypes = [...stage.allowedObstacles];
     this.obstacleWeights = { ...stage.obstacleWeights };
     this.difficultyId = difficultyId;
+    this.stageTaxiQuota = stage.taxiCountPerStage;
+    this.taxisSpawnedInStage = 0;
+    this.taxiSchedule = buildStageTaxiSchedule(
+      this.stageLength,
+      this.stageTaxiQuota
+    );
     this.spawnTimer = 0.35 / Math.sqrt(Math.max(0.5, this.trafficDensityScale));
 
     // Seed gentle opening traffic well ahead so stage starts lively yet safe
@@ -118,6 +142,8 @@ export class TrafficSpawner {
   }
 
   private seedInitialTraffic(): void {
+    // Let Encounter 0 claim a clean opening lane before regular traffic fills nearby slices
+    this.trySpawnScheduledTaxis(0);
     this.seedAroundDistance(0);
   }
 
@@ -193,11 +219,17 @@ export class TrafficSpawner {
           obs.direction,
           safeDt
         );
+        if (obs.type === 'taxi' && Array.isArray(obs.mesh.userData.taxiWheels)) {
+          const wheelSpin = (effectiveSpeed / TAXI_WHEEL_RADIUS) * safeDt;
+          for (const wheel of obs.mesh.userData.taxiWheels as THREE.Object3D[]) {
+            wheel.rotation.x -= wheelSpin;
+          }
+        }
       }
 
-      // Recycle shortly after passing behind chase camera or reaching road bounds
+      // Recycle shortly after the full vehicle length passes behind the chase camera
       if (
-        obs.distance < playerDistance - 7.5 ||
+        obs.distance < playerDistance - (spec.halfL + 8.5) ||
         obs.distance > this.stageLength - 10 ||
         obs.distance < -10
       ) {
@@ -210,7 +242,9 @@ export class TrafficSpawner {
       this.syncObstacleTransform(obs);
     }
 
-    // 2. Spawn new 2-way obstacles ahead while honoring per-stage road density & Safe Gap Rule
+    // 2. Spawn scheduled VF e34 taxis (strictly 2-3 per stage) & regular 2-way traffic
+    this.trySpawnScheduledTaxis(playerDistance);
+
     this.spawnTimer -= safeDt;
     if (this.spawnTimer <= 0) {
       const effectiveInterval =
@@ -234,7 +268,8 @@ export class TrafficSpawner {
   }
 
   private pickObstacleType(): ObstacleTypeId {
-    const pool = this.allowedTypes;
+    // Scheduled taxi quota strictly governs VF e34 appearances; random spawner excludes 'taxi'
+    const pool = this.allowedTypes.filter((t) => t !== 'taxi');
     if (pool.length === 0) return 'motorbike';
 
     const fallbackWeights: Record<ObstacleTypeId, number> = {
@@ -242,6 +277,7 @@ export class TrafficSpawner {
       flower_bike: 16,
       vendor: 10,
       car: 14,
+      taxi: 0,
       bus: 10,
       truck: 8
     };
@@ -259,11 +295,57 @@ export class TrafficSpawner {
     return pool[0];
   }
 
+  private trySpawnScheduledTaxis(playerDistance: number): void {
+    if (this.taxisSpawnedInStage >= this.stageTaxiQuota) return;
+
+    for (const slot of this.taxiSchedule) {
+      if (slot.spawned) continue;
+      if (playerDistance < slot.triggerPlayerDist) continue;
+
+      const minAhead = slot.preferOncoming ? 115 : 88;
+      const baseSpawnDist = Math.max(slot.targetSpawnDist, playerDistance + minAhead);
+      if (playerDistance + minAhead >= this.stageLength - 28) {
+        slot.spawned = true;
+        continue;
+      }
+
+      const offsets = [0, 16, -12, 32];
+      let spawnedThisTick = false;
+      for (const offset of offsets) {
+        const candidateDist = baseSpawnDist + offset;
+        if (
+          candidateDist < playerDistance + 76 ||
+          candidateDist >= this.stageLength - 28
+        ) {
+          continue;
+        }
+        if (this.trySpawnAtDistance(candidateDist, slot.preferOncoming, 'taxi')) {
+          slot.spawned = true;
+          this.taxisSpawnedInStage += 1;
+          spawnedThisTick = true;
+          break;
+        }
+      }
+
+      if (spawnedThisTick) {
+        return;
+      }
+
+      // Retry smoothly within [minAhead, minAhead + 45] ahead of the player on next tick
+      const nextStep = ((baseSpawnDist - (playerDistance + minAhead)) + 15) % 45;
+      slot.targetSpawnDist = Math.min(
+        this.stageLength - 32,
+        playerDistance + minAhead + nextStep
+      );
+    }
+  }
+
   private trySpawnAtDistance(
     spawnDist: number,
-    preferOncoming?: boolean
+    preferOncoming?: boolean,
+    forcedType?: ObstacleTypeId
   ): boolean {
-    const type = this.pickObstacleType();
+    const type = forcedType ?? this.pickObstacleType();
     const spec = OBSTACLE_TYPES[type];
     const diff = DIFFICULTIES[this.difficultyId];
     const laneCount = this.lanes.length;
@@ -468,6 +550,7 @@ export class TrafficSpawner {
       flower_bike: 0,
       vendor: 0,
       car: 0,
+      taxi: 0,
       bus: 0,
       truck: 0
     };
@@ -475,6 +558,31 @@ export class TrafficSpawner {
       counts[obs.type] += 1;
     }
     return counts;
+  }
+
+  public getTaxiStageStats(): {
+    spawnedInStage: number;
+    quota: number;
+    activeNow: number;
+    hasGltfModel: boolean;
+  } {
+    let activeNow = 0;
+    for (const obs of this.active) {
+      if (obs.type === 'taxi') activeNow += 1;
+    }
+    return {
+      spawnedInStage: this.taxisSpawnedInStage,
+      quota: this.stageTaxiQuota,
+      activeNow,
+      hasGltfModel: this.pool.hasTaxiTemplate()
+    };
+  }
+
+  public getHeavyModelStats(): { hasBusGltf: boolean; hasTruckGltf: boolean } {
+    return {
+      hasBusGltf: this.pool.hasBusTemplate(),
+      hasTruckGltf: this.pool.hasTruckTemplate()
+    };
   }
 
   public checkPlayerCollision(playerPose: PlayerPose): ActiveObstacle | null {
