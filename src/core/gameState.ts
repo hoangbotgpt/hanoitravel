@@ -4,10 +4,13 @@ import {
   type BikeId,
   type DifficultyId,
   type ObstacleTypeId,
+  type StageId,
   type StageSpec
 } from '../config/gameConfig.ts';
 import { applyCollisionPenalty, applyStageReward, createWallet } from './economy.ts';
 import { getRoadProgress } from './roadMath.ts';
+import type { ColdFineSettlement, RecordedViolation } from './violations.ts';
+import { settleColdFinesAtFinish } from './violations.ts';
 
 export type GameScreen =
   | 'menu'
@@ -22,7 +25,7 @@ export interface GameSessionState {
   bikeId: BikeId;
   difficultyId: DifficultyId;
   stageIndex: number;
-  stageId: 1 | 2 | 3;
+  stageId: StageId;
   wallet: number;
   distance: number;
   progress: number;
@@ -34,6 +37,7 @@ export interface GameSessionState {
   lastObstacleHit: ObstacleTypeId | null;
   lastStageReward: number;
   lastPerfectBonus: number;
+  lastColdFineSettlement: ColdFineSettlement | null;
   elapsedStageTime: number;
   totalRunTime: number;
 }
@@ -51,6 +55,8 @@ export interface StageCompletionOutcome {
   baseReward: number;
   perfectBonus: number;
   totalReward: number;
+  settlement: ColdFineSettlement | null;
+  bankrupt: boolean;
   isFinalStage: boolean;
 }
 
@@ -60,17 +66,22 @@ export interface StageCompletionOutcome {
 export function resetSession(
   bikeId: BikeId,
   difficultyId: DifficultyId,
-  initialScreen: GameScreen = 'playing'
+  initialScreen: GameScreen = 'playing',
+  initialStageId: StageId = 1
 ): GameSessionState {
-  const firstStage = STAGES[0];
+  const stageIdx = Math.max(
+    0,
+    STAGES.findIndex((s) => s.id === initialStageId)
+  );
+  const startStage = STAGES[stageIdx] ?? STAGES[0];
   const initialSpeed = initialScreen === 'playing' ? BIKES[bikeId].minCruiseSpeed : 0;
 
   return {
     screen: initialScreen,
     bikeId,
     difficultyId,
-    stageIndex: 0,
-    stageId: firstStage.id,
+    stageIndex: stageIdx,
+    stageId: startStage.id,
     wallet: createWallet(difficultyId),
     distance: 0,
     progress: 0,
@@ -82,6 +93,7 @@ export function resetSession(
     lastObstacleHit: null,
     lastStageReward: 0,
     lastPerfectBonus: 0,
+    lastColdFineSettlement: null,
     elapsedStageTime: 0,
     totalRunTime: 0
   };
@@ -92,9 +104,10 @@ export function resetSession(
  */
 export function createInitialGameState(
   bikeId: BikeId = 'honda',
-  difficultyId: DifficultyId = 'medium'
+  difficultyId: DifficultyId = 'medium',
+  initialStageId: StageId = 1
 ): GameSessionState {
-  return resetSession(bikeId, difficultyId, 'menu');
+  return resetSession(bikeId, difficultyId, 'menu', initialStageId);
 }
 
 export function getCurrentStageSpec(state: GameSessionState): StageSpec {
@@ -104,13 +117,14 @@ export function getCurrentStageSpec(state: GameSessionState): StageSpec {
 
 export function startNewGame(
   bikeId: BikeId,
-  difficultyId: DifficultyId
+  difficultyId: DifficultyId,
+  initialStageId: StageId = 1
 ): GameSessionState {
-  return resetSession(bikeId, difficultyId, 'playing');
+  return resetSession(bikeId, difficultyId, 'playing', initialStageId);
 }
 
 export function returnToMenu(state: GameSessionState): GameSessionState {
-  return resetSession(state.bikeId, state.difficultyId, 'menu');
+  return resetSession(state.bikeId, state.difficultyId, 'menu', state.stageId);
 }
 
 export function pauseGame(state: GameSessionState): GameSessionState {
@@ -187,7 +201,8 @@ export function applySessionCollision(
 }
 
 export function completeCurrentStage(
-  state: GameSessionState
+  state: GameSessionState,
+  violations: ReadonlyArray<RecordedViolation> = []
 ): StageCompletionOutcome {
   if (state.screen !== 'playing') {
     return {
@@ -196,6 +211,8 @@ export function completeCurrentStage(
       baseReward: 0,
       perfectBonus: 0,
       totalReward: 0,
+      settlement: null,
+      bankrupt: state.screen === 'game_over',
       isFinalStage: false
     };
   }
@@ -207,23 +224,37 @@ export function completeCurrentStage(
     state.difficultyId,
     state.hitsInStage
   );
-  const isFinalStage = state.stageIndex >= STAGES.length - 1;
+  const settlement = settleColdFinesAtFinish(
+    state.wallet,
+    reward.totalReward,
+    violations
+  );
+  const bankrupt = settlement.bankruptByColdFines;
+  const isFinalStage = !bankrupt && state.stageIndex >= STAGES.length - 1;
+  const nextScreen: GameScreen = bankrupt
+    ? 'game_over'
+    : isFinalStage
+      ? 'victory'
+      : 'stage_clear';
 
   return {
     state: {
       ...state,
-      screen: isFinalStage ? 'victory' : 'stage_clear',
-      wallet: reward.wallet,
+      screen: nextScreen,
+      wallet: settlement.finalWallet,
       distance: stage.length,
       progress: 1,
       speed: 0,
       lastStageReward: reward.baseReward,
-      lastPerfectBonus: reward.perfectBonus
+      lastPerfectBonus: reward.perfectBonus,
+      lastColdFineSettlement: settlement
     },
     completed: true,
     baseReward: reward.baseReward,
     perfectBonus: reward.perfectBonus,
     totalReward: reward.totalReward,
+    settlement,
+    bankrupt,
     isFinalStage
   };
 }
@@ -250,6 +281,7 @@ export function advanceToNextStage(state: GameSessionState): GameSessionState {
     lastObstacleHit: null,
     lastStageReward: 0,
     lastPerfectBonus: 0,
+    lastColdFineSettlement: null,
     elapsedStageTime: 0
   };
 }

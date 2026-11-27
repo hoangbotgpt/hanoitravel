@@ -1,4 +1,25 @@
+import {
+  OBSTACLE_TYPES,
+  type ObstacleTypeId,
+  type StageSpec
+} from '../config/gameConfig.ts';
+
 export type TrafficDirection = 1 | -1;
+
+/**
+ * Ver 2.0 road-class & chapter-level filter (FR-23).
+ */
+export function isObstacleAllowedOnStage(
+  type: ObstacleTypeId,
+  stage: StageSpec
+): boolean {
+  const spec = OBSTACLE_TYPES[type];
+  if (!spec.allowedRoadClasses.includes(stage.laneCount)) return false;
+  if (spec.minLevelInChapter && stage.levelInChapter < spec.minLevelInChapter) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * Hanoi two-way carriageway convention (supports 2-lane, 4-lane, and 6-lane roads):

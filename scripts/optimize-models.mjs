@@ -10,6 +10,8 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 
 const OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'models');
+const LANDMARKS_OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'landmarks');
+const TRAFFIC_OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'traffic');
 const DRACO_OUTPUT_DIR = path.join(ROOT_DIR, 'public', 'assets', 'draco');
 const DRACO_SRC_DIR = path.join(
   ROOT_DIR,
@@ -34,6 +36,126 @@ const PASSTHROUGH_MODELS = [
     name: 'vf_e34_taxi',
     inputRelPath: path.join('Models', 'VF_e34_Taxi.glb'),
     outputFilename: 'vf_e34_taxi.glb'
+  },
+  {
+    name: 'suzuki_rgv',
+    inputRelPath: path.join('Models', 'suzuky-rgv.glb'),
+    outputFilename: 'suzuki_rgv.glb'
+  },
+  {
+    name: 'suzuki_gsxs',
+    inputRelPath: path.join('Models', 'GSX_S.glb'),
+    outputFilename: 'suzuki_gsxs.glb'
+  }
+];
+
+const PASSTHROUGH_TRAFFIC_MODELS = [
+  ...[
+    'coupe_black.glb',
+    'coupe_grey.glb',
+    'coupe_red.glb',
+    'coupe_white.glb',
+    'hatch_black.glb',
+    'hatch_white.glb',
+    'hatch_yellow.glb',
+    'suv_black.glb',
+    'suv_blue.glb',
+    'suv_white.glb'
+  ].map((file) => ({
+    name: `car_${file.replace(/\.glb$/i, '')}`,
+    inputRelPath: path.join('Models', 'cars', file),
+    outputRelPath: path.join('cars', file)
+  })),
+  ...[
+    'ecoline_blue.glb',
+    'ecoline_green.glb',
+    'ecoline_red.glb',
+    'ecoline_white.glb'
+  ].map((file) => ({
+    name: `bus_${file.replace(/\.glb$/i, '')}`,
+    inputRelPath: path.join('Models', 'buses', file),
+    outputRelPath: path.join('buses', file)
+  })),
+  {
+    name: 'bus_irizar_i6',
+    inputRelPath: path.join('Models', 'buses', 'IRIZAR_I6.glb'),
+    outputRelPath: path.join('buses', 'irizar_i6.glb')
+  },
+  ...[
+    'dump_truck.glb',
+    'semi_tractor.glb',
+    'semi_container45_blue.glb',
+    'semi_container45_green.glb',
+    'semi_container45_grey.glb',
+    'semi_container45_red.glb',
+    'pickup_blue.glb',
+    'pickup_grey.glb',
+    'pickup_red.glb',
+    'pickup_white.glb',
+    'pickup_strada_black.glb',
+    'pickup_strada_red.glb',
+    'pickup_strada_silver.glb',
+    'pickup_strada_white.glb',
+    'van_beige.glb',
+    'van_blue.glb',
+    'van_silver.glb',
+    'van_teal.glb',
+    'van_white.glb'
+  ].map((file) => ({
+    name: `truck_${file.replace(/\.glb$/i, '')}`,
+    inputRelPath: path.join('Models', 'Trucks', file),
+    outputRelPath: path.join('trucks', file)
+  }))
+];
+
+const LANDMARK_MODELS = [
+  {
+    name: 'my_dinh_stadium',
+    inputRelPath: path.join('Models', 'my_dinh_stadium.glb'),
+    outputFilename: 'my_dinh_stadium.glb'
+  },
+  {
+    name: 'military_museum',
+    inputRelPath: path.join('Models', 'military_museum.glb'),
+    outputFilename: 'military_museum.glb'
+  },
+  {
+    name: 'vinuni_campus',
+    inputRelPath: path.join('Models', 'vinuni_campus.glb'),
+    outputFilename: 'vinuni_campus.glb'
+  },
+  {
+    name: 'lang_bac',
+    inputRelPath: path.join('Models', 'LangBac_Game.glb'),
+    outputFilename: 'lang_bac.glb'
+  },
+  {
+    name: 'cot_co',
+    inputRelPath: path.join('Models', 'CotCoHaNoi_Game.glb'),
+    outputFilename: 'cot_co.glb'
+  },
+  {
+    name: 'ga_ha_noi',
+    inputRelPath: path.join('Models', 'GaHaNoiCo_Game.glb'),
+    outputFilename: 'ga_ha_noi.glb'
+  }
+];
+
+const PASSTHROUGH_LANDMARK_MODELS = [
+  {
+    name: 'nha_hat_lon',
+    inputRelPath: path.join('Models', 'NhaHatLon_ChiTiet_Game_Draco.glb'),
+    outputFilename: 'nha_hat_lon.glb'
+  },
+  {
+    name: 'nha_tho_lon',
+    inputRelPath: path.join('Models', 'NhaThoLon_Game_Draco.glb'),
+    outputFilename: 'nha_tho_lon.glb'
+  },
+  {
+    name: 'thap_rua',
+    inputRelPath: path.join('Models', 'ThapRua_Game_Draco.glb'),
+    outputFilename: 'thap_rua.glb'
   }
 ];
 
@@ -363,6 +485,58 @@ async function runMeshPhase() {
   if (totalBytes > MAX_TOTAL_BYTES) {
     throw new Error(
       `Optimized models exceed 8 MB budget: ${totalBytes} > ${MAX_TOTAL_BYTES}`
+    );
+  }
+
+  // Optimize Chapter 1 destination landmark GLBs into separate public/assets/landmarks/
+  // (dedup + weld + prune + meshopt, NO simplify so architectural detail stays crisp).
+  fs.mkdirSync(LANDMARKS_OUTPUT_DIR, { recursive: true });
+  for (const lm of LANDMARK_MODELS) {
+    const inputPath = path.join(ROOT_DIR, lm.inputRelPath);
+    const outPath = path.join(LANDMARKS_OUTPUT_DIR, lm.outputFilename);
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Missing source landmark model: ${inputPath}`);
+    }
+    const srcBytes = fs.statSync(inputPath).size;
+    const doc = await io.read(inputPath);
+    const srcTris = countDocumentTriangles(doc);
+    await doc.transform(
+      dedup(),
+      weld(),
+      prune(),
+      meshopt({ encoder: MeshoptEncoder, level: 'medium' })
+    );
+    await io.write(outPath, doc);
+    const dstBytes = fs.statSync(outPath).size;
+    console.log(
+      `[optimize-models] landmark ${lm.name}: ${srcTris} tris | ${(srcBytes / 1024).toFixed(1)} KB -> ${(dstBytes / 1024).toFixed(1)} KB (${outPath})`
+    );
+  }
+
+  for (const passLm of PASSTHROUGH_LANDMARK_MODELS) {
+    const srcPath = path.join(ROOT_DIR, passLm.inputRelPath);
+    const outPath = path.join(LANDMARKS_OUTPUT_DIR, passLm.outputFilename);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Missing source passthrough landmark model: ${srcPath}`);
+    }
+    fs.copyFileSync(srcPath, outPath);
+    const dstBytes = fs.statSync(outPath).size;
+    console.log(
+      `[optimize-models] landmark ${passLm.name}: passthrough Draco+JPEG (${(dstBytes / 1024).toFixed(1)} KB -> ${outPath})`
+    );
+  }
+
+  for (const passTraffic of PASSTHROUGH_TRAFFIC_MODELS) {
+    const srcPath = path.join(ROOT_DIR, passTraffic.inputRelPath);
+    const outPath = path.join(TRAFFIC_OUTPUT_DIR, passTraffic.outputRelPath);
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`Missing source passthrough traffic model: ${srcPath}`);
+    }
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.copyFileSync(srcPath, outPath);
+    const dstBytes = fs.statSync(outPath).size;
+    console.log(
+      `[optimize-models] traffic ${passTraffic.name}: passthrough Draco (${(dstBytes / 1024).toFixed(1)} KB -> ${outPath})`
     );
   }
 }

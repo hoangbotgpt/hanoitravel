@@ -16,10 +16,10 @@
   --ui-success: #4ca66b;
   --ui-success-bright: #8ee4aa;
 
-  /* Typography Roles (3 Vietnamese-capable webfonts with crisp offline fallbacks) */
-  --font-display: 'Playfair Display', 'Be Vietnam Pro', 'Segoe UI', system-ui, sans-serif;
-  --font-sans: 'Be Vietnam Pro', 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Be Vietnam Pro', monospace;
+  /* Unified Single Typography Role (FR-10: Be Vietnam Pro only) */
+  --font-display: 'Be Vietnam Pro', system-ui, sans-serif;
+  --font-sans: 'Be Vietnam Pro', system-ui, sans-serif;
+  --font-mono: 'Be Vietnam Pro', system-ui, sans-serif;
 
   /* Fluid Type Scale (floor >= 12px) */
   --fs-xs: clamp(12px, 1.55vmin, 14px);
@@ -66,6 +66,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
 button:focus-visible,
 input:focus-visible {
   outline: 2px solid #ffe4a8;
@@ -79,7 +86,8 @@ kbd {
   min-width: 24px;
   height: 22px;
   padding: 0 var(--sp-2);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   font-weight: 700;
   background: rgba(246, 238, 220, 0.14);
@@ -149,6 +157,27 @@ kbd {
 
 .damage-vignette.active {
   opacity: 1;
+}
+
+/* Speed Camera Flash Overlay (FR-09) */
+.camera-flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 19;
+  opacity: 0;
+  background: radial-gradient(
+    circle at 50% 28%,
+    rgba(255, 250, 224, 0.72) 0%,
+    rgba(243, 190, 89, 0.36) 45%,
+    rgba(255, 255, 255, 0) 80%
+  );
+  transition: opacity 0.22s ease-out;
+}
+
+.camera-flash.active {
+  opacity: 1;
+  transition: none;
 }
 
 /* Portrait Prompt on Mobile */
@@ -370,6 +399,36 @@ kbd {
   padding-bottom: var(--sp-3);
 }
 
+.menu-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+
+.menu-header-top .retro-stamp {
+  margin-bottom: 0;
+}
+
+.menu-career-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: rgba(31, 138, 140, 0.22);
+  border: 1px solid rgba(124, 226, 228, 0.45);
+  font-size: var(--fs-xs);
+  color: var(--ui-text);
+}
+
+.menu-career-pill strong {
+  color: var(--ui-accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .game-title {
   margin: 0;
   font-family: var(--font-display);
@@ -482,6 +541,12 @@ kbd {
   color: var(--ui-teal-bright);
 }
 
+.bike-badge.two-stroke {
+  background: rgba(217, 78, 59, 0.28);
+  color: #ffb8ad;
+  border: 1px solid rgba(243, 190, 89, 0.45);
+}
+
 .bike-tagline {
   margin: var(--sp-2) 0 var(--sp-3);
   font-size: var(--fs-xs);
@@ -566,12 +631,60 @@ kbd {
   color: var(--ui-muted);
 }
 
+.stage-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.stage-select {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--ui-text);
+  background: rgba(24, 18, 13, 0.94);
+  border: 1.5px solid rgba(217, 164, 65, 0.55);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.stage-select:focus-visible {
+  outline: 2px solid #ffe4a8;
+  outline-offset: 2px;
+}
+
 .menu-actions {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
   margin-top: auto;
+}
+
+.menu-cta-row {
+  display: grid;
+  grid-template-columns: 1.45fr 1fr;
+  gap: var(--sp-2);
+  align-items: stretch;
+}
+
+.shop-entry-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0.03em;
+  background: rgba(31, 138, 140, 0.24);
+  border-color: rgba(124, 226, 228, 0.65);
+  color: var(--ui-teal-bright);
+}
+
+.shop-entry-btn:hover {
+  background: rgba(31, 138, 140, 0.4);
+  border-color: var(--ui-teal-bright);
+  color: #ffffff;
 }
 
 .retro-cta {
@@ -689,8 +802,9 @@ kbd {
 .hud-top-row {
   display: flex;
   align-items: flex-start;
+  justify-content: space-between;
   gap: var(--sp-4);
-  padding-right: 60px; /* Room for single 44px pause icon button */
+  padding-right: 54px; /* Room for single 44px pause icon button */
 }
 
 .hud-card {
@@ -743,7 +857,8 @@ kbd {
 }
 
 .wallet-delta {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
   font-size: var(--fs-sm);
   font-weight: 700;
   color: #ff8270;
@@ -797,78 +912,293 @@ kbd {
   border-color: #59c5c7;
 }
 
-/* Zone 2: Full-Title Progress Header */
-.hud-route {
-  flex: 1;
-  min-width: 0;
-}
-
-.hud-route-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  margin-bottom: var(--sp-2);
-  flex-wrap: wrap;
-}
-
-.stage-chip {
-  padding: 2px var(--sp-2);
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  background: var(--ui-accent);
-  color: #1c1510;
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-}
-
-.stage-title {
-  flex: 1;
-  font-family: var(--font-display);
-  font-size: var(--fs-lg);
-  font-weight: 700;
-  color: var(--ui-text);
-  line-height: 1.2;
-}
-
-.distance-chip {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  font-weight: 700;
-  color: var(--ui-text);
+.status-pill.fine-pill {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--ui-muted);
+  border-color: rgba(246, 238, 220, 0.25);
   font-variant-numeric: tabular-nums;
+}
+
+.status-pill.fine-pill.has-fines {
+  background: rgba(224, 123, 46, 0.26);
+  color: #ffc38a;
+  border-color: rgba(224, 123, 46, 0.72);
+}
+
+.status-pill.fine-pill.heavy-fines {
+  background: rgba(217, 78, 59, 0.28);
+  color: #ffb8ad;
+  border-color: rgba(217, 78, 59, 0.78);
+}
+
+.violation-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: rgba(45, 28, 14, 0.95);
+  border: 1.5px solid #f3be59;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  color: #ffe8b0;
   white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
 }
 
-.route-track {
-  position: relative;
-  height: 8px;
-  background: rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  border: 1px solid rgba(217, 164, 65, 0.45);
+/* Cold Fine Settlement Breakdown Ledger */
+.fines-ledger {
+  background: rgba(34, 18, 14, 0.85);
+  border: 1px solid rgba(217, 78, 59, 0.55);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  max-height: 150px;
+  overflow-y: auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.route-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--ui-teal), var(--ui-accent));
-  transition: width 0.08s linear;
-}
-
-.route-marker {
-  position: absolute;
-  top: 50%;
-  transform: translate(-50%, -62%);
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
-}
-
-.route-endpoints {
-  margin-top: var(--sp-2);
+.fines-ledger-summary {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: var(--sp-2);
   font-size: var(--fs-xs);
   color: var(--ui-muted);
+}
+
+.fines-ledger-summary strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.fines-ledger-summary.net {
+  border-top: 1px solid rgba(217, 164, 65, 0.28);
+  padding-top: 4px;
+  font-weight: 700;
+  color: var(--ui-text);
+}
+
+.fines-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.fine-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: rgba(217, 78, 59, 0.2);
+  border: 1px solid rgba(217, 78, 59, 0.45);
+  color: #ffb8ad;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Zone 2: Phone-Style Corner GPS Mini-Map */
+/* Top-Center 3D Rearview Mirror Frame (viewport MUST stay transparent for WebGL scissor pass) */
+.rearview-mirror {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 22;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.rearview-frame-top {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.rearview-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #f6eedc;
+  background: rgba(20, 17, 15, 0.85);
+  border: 1px solid rgba(217, 164, 65, 0.55);
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.rear-alert {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #1c1510;
+  background: #f3be59;
+  border: 1px solid #ffe8b0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rear-alert.reckless {
+  background: #d92626;
+  color: #fff6f2;
+  border-color: #ffb3a7;
+}
+
+.rearview-viewport {
+  width: 224px;
+  height: 62px;
+  background: transparent;
+  border: 2px solid rgba(217, 164, 65, 0.85);
+  border-radius: 8px;
+  box-shadow:
+    inset 0 0 12px rgba(0, 0, 0, 0.35),
+    0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.rearview-mirror.threat .rearview-viewport {
+  border-color: #ff6b57;
+  animation: threatPulse 0.75s ease-in-out infinite alternate;
+}
+
+@keyframes threatPulse {
+  from {
+    box-shadow:
+      inset 0 0 10px rgba(217, 78, 59, 0.35),
+      0 0 10px rgba(255, 107, 87, 0.45);
+  }
+  to {
+    box-shadow:
+      inset 0 0 14px rgba(217, 78, 59, 0.65),
+      0 0 18px rgba(255, 107, 87, 0.85);
+  }
+}
+
+/* Zone 2: Speed Limit Sign + Phone-Style Corner GPS Mini-Map */
+.hud-top-right-cluster {
+  margin-left: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+
+.speed-limit-sign {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #f8f4ea;
+  border: 5px solid #d92626;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.speed-limit-value {
+  font-size: 16px;
+  font-weight: 800;
+  color: #1b1510;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.speed-limit-sign.overspeed {
+  animation: overspeedPulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes overspeedPulse {
+  from {
+    box-shadow: 0 0 8px rgba(217, 38, 38, 0.55);
+    transform: scale(1);
+  }
+  to {
+    box-shadow: 0 0 18px rgba(255, 90, 71, 0.95);
+    transform: scale(1.06);
+  }
+}
+
+.hud-speedo.overspeed {
+  border-color: #ff6b57;
+}
+
+.hud-minimap {
+  margin-left: 0;
+  width: 148px;
+  max-width: 15vw;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: rgba(20, 17, 15, 0.92);
+  border: 1.5px solid rgba(217, 164, 65, 0.8);
+  border-radius: 14px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+}
+
+.minimap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stage-chip {
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--ui-accent);
+  color: #1c1510;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.minimap-stage-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ui-text);
+}
+
+.minimap-screen {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(124, 226, 228, 0.25);
+  background: #121a21;
+}
+
+#minimap-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.minimap-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.distance-chip {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ui-teal-bright);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Top-Band Toast Stack (kept strictly in upper ~14%, never center screen) */
@@ -932,12 +1262,18 @@ kbd {
   align-items: center;
   gap: var(--sp-3);
   min-width: 196px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.hud-speedo.braking {
+  border-color: var(--ui-danger);
+  background: rgba(68, 22, 18, 0.9);
 }
 
 .speedo-value {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2xl);
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1;
   color: var(--ui-accent);
   font-variant-numeric: tabular-nums;
@@ -952,11 +1288,28 @@ kbd {
   gap: 6px;
 }
 
+.speedo-top-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
 .speedo-unit {
   font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--ui-muted);
+}
+
+.brake-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: var(--ui-danger);
+  color: #fff6f2;
 }
 
 .speedo-bar {
@@ -1191,6 +1544,237 @@ kbd {
   color: var(--ui-muted);
 }
 
+/* Bike Shop Modal */
+#screen-shop {
+  z-index: 55;
+}
+
+.shop-modal-card {
+  width: min(880px, 95vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  text-align: left;
+}
+
+.shop-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--ui-border-subtle);
+  padding-bottom: var(--sp-3);
+}
+
+.shop-title-group .modal-title {
+  margin-bottom: 0;
+}
+
+.shop-wallet-pill {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: rgba(20, 15, 11, 0.78);
+  border: 1px solid rgba(217, 164, 65, 0.45);
+  border-radius: var(--radius-md);
+}
+
+.shop-wallet-label {
+  font-size: var(--fs-xs);
+  color: var(--ui-muted);
+}
+
+.shop-wallet-value {
+  font-size: var(--fs-md);
+  font-weight: 800;
+  color: var(--ui-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-deliveries-chip {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(31, 138, 140, 0.25);
+  color: var(--ui-teal-bright);
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-bike-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: var(--sp-3);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.shop-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: rgba(26, 20, 15, 0.9);
+  border: 1.5px solid var(--ui-border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.shop-card.active {
+  border-color: var(--ui-accent);
+  background: rgba(65, 48, 31, 0.9);
+}
+
+.shop-card.coming-soon {
+  border-style: dashed;
+  border-color: rgba(246, 238, 220, 0.22);
+  background: rgba(24, 19, 15, 0.76);
+}
+
+.shop-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shop-card-badges {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.shop-status-chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+
+.shop-status-chip.selected {
+  background: rgba(76, 166, 107, 0.28);
+  color: var(--ui-success-bright);
+}
+
+.shop-status-chip.owned {
+  background: rgba(232, 168, 56, 0.2);
+  color: var(--ui-accent);
+}
+
+.shop-status-chip.soon {
+  background: rgba(224, 123, 46, 0.24);
+  color: #ffc38a;
+}
+
+.shop-status-chip.available {
+  background: rgba(76, 166, 107, 0.28);
+  color: var(--ui-success-bright);
+  border: 1px solid rgba(76, 166, 107, 0.5);
+}
+
+.shop-bike-name {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--ui-text);
+}
+
+.shop-price {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--ui-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-price.owned {
+  color: var(--ui-success-bright);
+  font-size: var(--fs-xs);
+}
+
+.shop-bike-tagline {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--ui-muted);
+  line-height: 1.4;
+}
+
+.shop-card-footer {
+  margin-top: auto;
+  padding-top: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shop-coming-notice {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #ffc38a;
+  background: rgba(224, 123, 46, 0.14);
+  border: 1px solid rgba(224, 123, 46, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+}
+
+.shop-ready-note {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #ffd4a3;
+  background: rgba(224, 123, 46, 0.14);
+  border: 1px solid rgba(224, 123, 46, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-ready-note.ready {
+  color: var(--ui-success-bright);
+  background: rgba(76, 166, 107, 0.18);
+  border-color: rgba(76, 166, 107, 0.45);
+}
+
+.shop-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shop-test-btn {
+  background: rgba(31, 138, 140, 0.24);
+  border-color: rgba(124, 226, 228, 0.6);
+  color: var(--ui-teal-bright);
+}
+
+.shop-test-btn:hover {
+  background: rgba(31, 138, 140, 0.4);
+  border-color: var(--ui-teal-bright);
+  color: #ffffff;
+}
+
+.shop-card-btn {
+  padding: 8px var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+.shop-card-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.shop-modal-actions {
+  flex-direction: row;
+  justify-content: flex-end;
+}
+
+.shop-modal-actions .retro-btn {
+  width: auto;
+  min-width: 180px;
+}
+
 /* Laptop / Compact Desktop (900-1279px) */
 @media (max-width: 1279px) {
   .menu-layout {
@@ -1203,21 +1787,215 @@ kbd {
   }
 }
 
-/* Compact windows (< 900px wide or short height): HUD tightening */
-@media (max-width: 899px), (max-height: 520px) {
+/* Mobile Landscape & Compact Windows (<= 960px, <= 520px height, or coarse pointer) */
+@media (max-width: 960px), (max-height: 520px), (pointer: coarse) {
+  :root {
+    --fs-xs: 10px;
+    --fs-sm: 11px;
+    --fs-md: 12.5px;
+    --fs-lg: 14px;
+    --fs-xl: 18px;
+    --fs-2xl: 22px;
+  }
+
   .hud-layer {
-    padding: max(var(--sp-2), env(safe-area-inset-top)) max(var(--sp-3), env(safe-area-inset-right))
-      max(var(--sp-2), env(safe-area-inset-bottom)) max(var(--sp-3), env(safe-area-inset-left));
+    padding: max(6px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+      max(6px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
   }
+
+  .top-controls {
+    top: max(6px, env(safe-area-inset-top));
+    right: max(10px, env(safe-area-inset-right));
+  }
+
+  .pause-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .pause-btn .icon-svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .hud-top-row {
+    gap: 8px;
+    padding-right: 42px;
+  }
+
   .hud-wallet {
-    min-width: 175px;
-    padding: var(--sp-2) var(--sp-3);
+    min-width: 0;
+    padding: 4px 8px;
+    border-radius: 8px;
   }
-  .hud-route {
-    padding: var(--sp-2) var(--sp-3);
-  }
-  .route-endpoints {
+
+  .hud-kicker {
     display: none;
+  }
+
+  .hud-wallet-amount {
+    font-size: 15px;
+  }
+
+  .hud-subrow {
+    margin-top: 2px;
+    gap: 4px;
+  }
+
+  .status-pill {
+    font-size: 10px;
+    padding: 1px 6px;
+  }
+
+  .hud-minimap {
+    width: 116px;
+    max-width: none;
+    min-width: 112px;
+    padding: 4px 5px;
+    gap: 3px;
+    border-radius: 10px;
+  }
+
+  .stage-chip {
+    font-size: 9.5px;
+    padding: 1px 4px;
+  }
+
+  .minimap-stage-name {
+    font-size: 9.5px;
+  }
+
+  #minimap-canvas {
+    height: 82px;
+  }
+
+  .minimap-footer {
+    padding: 2px 3px;
+  }
+
+  .distance-chip {
+    font-size: 9.5px;
+    letter-spacing: -0.01em;
+  }
+
+  .hud-speedo {
+    min-width: 102px;
+    padding: 4px 8px;
+    gap: 6px;
+    border-radius: 8px;
+  }
+
+  .speedo-value {
+    min-width: 32px;
+    font-size: 20px;
+  }
+
+  .speedo-unit,
+  .brake-badge {
+    font-size: 9.5px;
+  }
+
+  .speedo-bar {
+    height: 5px;
+  }
+
+  .touch-controls {
+    padding: max(6px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-right))
+      max(6px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+  }
+
+  .touch-pad-left,
+  .touch-pad-right {
+    gap: 6px;
+  }
+
+  .touch-btn {
+    min-width: 48px;
+    min-height: 46px;
+    padding: 0 8px;
+    opacity: 0.62;
+    font-size: 11px;
+    border-radius: 8px;
+  }
+
+  .touch-btn .icon-svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .toast-stack {
+    top: 66px;
+  }
+
+  .rearview-mirror {
+    top: max(6px, env(safe-area-inset-top));
+  }
+
+  .rearview-frame-top {
+    position: absolute;
+    top: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+  }
+
+  .rearview-label {
+    display: none;
+  }
+
+  .rear-alert {
+    font-size: 9px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+
+  .rearview-viewport {
+    width: 146px;
+    height: 40px;
+    border-width: 1.5px;
+    border-radius: 6px;
+  }
+
+  .hud-top-right-cluster {
+    gap: 5px;
+  }
+
+  .speed-limit-sign {
+    width: 34px;
+    height: 34px;
+    border-width: 3.5px;
+  }
+
+  .speed-limit-value {
+    font-size: 12px;
+  }
+
+  .penalty-toast,
+  .violation-toast {
+    padding: 4px 10px;
+    font-size: 11px;
+  }
+
+  .stage-select {
+    padding: 5px 8px;
+    font-size: 10.5px;
+  }
+
+  .shop-modal-card {
+    padding: var(--sp-3);
+    gap: var(--sp-2);
+  }
+
+  .shop-bike-grid {
+    min-height: 0;
+    grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+    gap: var(--sp-2);
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .hud-bottom-row {
+    margin-bottom: 54px;
   }
 }
 
@@ -1234,11 +2012,14 @@ kbd {
     gap: var(--sp-3);
   }
   .menu-panel {
-    padding: var(--sp-3);
-    gap: var(--sp-2);
+    padding: 8px 10px;
+    gap: 6px;
   }
   .menu-scroll {
-    gap: var(--sp-3);
+    gap: 8px;
+  }
+  .stat-rows {
+    gap: 3px;
   }
   .menu-header {
     padding-bottom: var(--sp-2);

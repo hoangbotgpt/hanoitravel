@@ -2,7 +2,17 @@ import * as THREE from 'three';
 import { HANOI_PALETTE } from '../config/artPalette.ts';
 import { OBSTACLE_TYPES, type ObstacleTypeId } from '../config/gameConfig.ts';
 
-function createBusSignTexture(): THREE.CanvasTexture {
+function createHeadlessTexture(r: number, g: number, b: number): THREE.DataTexture {
+  const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1, THREE.RGBAFormat);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function createBusSignTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(24, 26, 29);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 128;
   canvas.height = 64;
@@ -14,7 +24,7 @@ function createBusSignTexture(): THREE.CanvasTexture {
     ctx.lineWidth = 4;
     ctx.strokeRect(4, 4, 120, 56);
     ctx.fillStyle = '#ff3b30';
-    ctx.font = 'bold 42px monospace';
+    ctx.font = 'bold 42px "Be Vietnam Pro", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('14', 64, 34);
@@ -24,7 +34,10 @@ function createBusSignTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function createTaxiRoofTexture(): THREE.CanvasTexture {
+function createTaxiRoofTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(255, 243, 191);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 128;
   canvas.height = 64;
@@ -33,7 +46,7 @@ function createTaxiRoofTexture(): THREE.CanvasTexture {
     ctx.fillStyle = '#fff3bf';
     ctx.fillRect(0, 0, 128, 64);
     ctx.fillStyle = '#22272a';
-    ctx.font = 'bold 34px sans-serif';
+    ctx.font = 'bold 34px "Be Vietnam Pro", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('TAXI', 64, 34);
@@ -45,29 +58,42 @@ function createTaxiRoofTexture(): THREE.CanvasTexture {
 
 /**
  * Shared geometry/material pool for all Hanoi traffic & obstacle types:
- * motorbike, flower_bike, vendor, car, taxi (VF e34 Xanh SM), bus, truck.
+ * motorbike, reckless_moto, flower_bike, vendor, tourist, office_worker,
+ * car, taxi (VF e34 Xanh SM), bus, truck (1.9T Canter), and heavy_truck.
  * Every mesh is grounded at y = 0, centered in X/Z, facing -Z.
  */
 export class TrafficVisualPool {
   private readonly pools: Record<ObstacleTypeId, THREE.Group[]> = {
     motorbike: [],
+    reckless_moto: [],
     flower_bike: [],
     vendor: [],
+    tourist: [],
+    office_worker: [],
     car: [],
     taxi: [],
     bus: [],
-    truck: []
+    truck: [],
+    heavy_truck: []
   };
 
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private readonly mats: Record<string, THREE.Material>;
   private readonly geos: Record<string, THREE.BufferGeometry>;
   private taxiTemplate: THREE.Group | null = null;
-  private busTemplate: THREE.Group | null = null;
-  private truckTemplate: THREE.Group | null = null;
+  private busTemplates: THREE.Group[] = [];
+  private busTemplateCursor = 0;
+  private carTemplates: THREE.Group[] = [];
+  private carTemplateCursor = 0;
+  private truckTemplates: THREE.Group[] = [];
+  private truckTemplateCursor = 0;
+  private heavyTruckTemplates: THREE.Group[] = [];
+  private heavyTruckTemplateCursor = 0;
   private motorbikeColorVariant = 0;
   private carColorVariant = 0;
   private truckVariant = 0;
+  private pedestrianVariant = 0;
+  private heavyTruckVariant = 0;
 
   constructor() {
     const track = <T extends { dispose: () => void }>(res: T): T => {
@@ -232,6 +258,81 @@ export class TrafficVisualPool {
           roughness: 0.55,
           metalness: 0.35
         })
+      ),
+      // Reckless sport motorbike
+      sportBlack: track(
+        new THREE.MeshStandardMaterial({
+          color: 0x181b20,
+          roughness: 0.28,
+          metalness: 0.48,
+          envMapIntensity: 1.35
+        })
+      ),
+      sportCrimson: track(
+        new THREE.MeshStandardMaterial({
+          color: 0xd92626,
+          roughness: 0.26,
+          metalness: 0.35,
+          envMapIntensity: 1.4
+        })
+      ),
+      // Tourist & Office Worker pedestrians
+      touristCoral: track(
+        new THREE.MeshStandardMaterial({ color: 0xe66a4c, roughness: 0.78 })
+      ),
+      touristSky: track(
+        new THREE.MeshStandardMaterial({ color: 0x3b8ec2, roughness: 0.78 })
+      ),
+      touristShorts: track(
+        new THREE.MeshStandardMaterial({ color: 0xc8b288, roughness: 0.85 })
+      ),
+      backpackOlive: track(
+        new THREE.MeshStandardMaterial({ color: 0x4b5d3b, roughness: 0.84 })
+      ),
+      officeShirtWhite: track(
+        new THREE.MeshStandardMaterial({ color: 0xf4f2ec, roughness: 0.72 })
+      ),
+      officeShirtBlue: track(
+        new THREE.MeshStandardMaterial({ color: 0xc2d8eb, roughness: 0.72 })
+      ),
+      briefcaseLeather: track(
+        new THREE.MeshStandardMaterial({ color: 0x4e3222, roughness: 0.62, metalness: 0.12 })
+      ),
+      hairDark: track(
+        new THREE.MeshStandardMaterial({ color: 0x1c1917, roughness: 0.88 })
+      ),
+      // Heavy multi-axle container truck (6-lane only)
+      containerBlue: track(
+        new THREE.MeshStandardMaterial({
+          color: 0x1e4d7a,
+          roughness: 0.52,
+          metalness: 0.38,
+          envMapIntensity: 1.15
+        })
+      ),
+      containerRust: track(
+        new THREE.MeshStandardMaterial({
+          color: 0x993e2b,
+          roughness: 0.56,
+          metalness: 0.34,
+          envMapIntensity: 1.1
+        })
+      ),
+      heavyCabRed: track(
+        new THREE.MeshStandardMaterial({
+          color: 0xb83328,
+          roughness: 0.32,
+          metalness: 0.34,
+          envMapIntensity: 1.3
+        })
+      ),
+      heavyCabWhite: track(
+        new THREE.MeshStandardMaterial({
+          color: 0xedeae2,
+          roughness: 0.34,
+          metalness: 0.25,
+          envMapIntensity: 1.25
+        })
       )
     };
 
@@ -265,12 +366,16 @@ export class TrafficVisualPool {
   private prewarm(): void {
     const counts: Record<ObstacleTypeId, number> = {
       motorbike: 10,
+      reckless_moto: 4,
       flower_bike: 5,
       vendor: 4,
+      tourist: 4,
+      office_worker: 4,
       car: 12,
       taxi: 3,
       bus: 8,
-      truck: 8
+      truck: 8,
+      heavy_truck: 5
     };
     (Object.keys(counts) as ObstacleTypeId[]).forEach((type) => {
       for (let i = 0; i < counts[type]; i++) {
@@ -283,12 +388,20 @@ export class TrafficVisualPool {
     return this.taxiTemplate !== null;
   }
 
+  public hasCarTemplates(): boolean {
+    return this.carTemplates.length > 0;
+  }
+
   public hasBusTemplate(): boolean {
-    return this.busTemplate !== null;
+    return this.busTemplates.length > 0;
   }
 
   public hasTruckTemplate(): boolean {
-    return this.truckTemplate !== null;
+    return this.truckTemplates.length > 0;
+  }
+
+  public hasHeavyTruckTemplate(): boolean {
+    return this.heavyTruckTemplates.length > 0;
   }
 
   public setTaxiTemplate(template: THREE.Group): void {
@@ -299,23 +412,114 @@ export class TrafficVisualPool {
     }
   }
 
-  public setBusTemplate(template: THREE.Group): void {
-    this.busTemplate = template;
+  public setCarTemplates(templates: THREE.Group[]): void {
+    this.carTemplates = [...templates];
+    this.carTemplateCursor = 0;
+    this.pools.car = [];
+    if (this.carTemplates.length === 0) return;
+    for (let i = 0; i < 16; i++) {
+      const tpl = this.carTemplates[i % this.carTemplates.length];
+      const clone = tpl.clone(true);
+      clone.userData = { ...tpl.userData, isGltfCar: true };
+      this.pools.car.push(clone);
+    }
+  }
+
+  public addCarTemplates(templates: THREE.Group[]): void {
+    if (templates.length === 0) return;
+    this.carTemplates.push(...templates);
+    for (const tpl of templates) {
+      const clone = tpl.clone(true);
+      clone.userData = { ...tpl.userData, isGltfCar: true };
+      const insertIdx = Math.floor(this.pools.car.length * 0.75);
+      this.pools.car.splice(insertIdx, 0, clone);
+    }
+  }
+
+  public setBusTemplates(templates: THREE.Group[]): void {
+    this.busTemplates = [...templates];
+    this.busTemplateCursor = 0;
     this.pools.bus = [];
-    for (let i = 0; i < 8; i++) {
-      const clone = template.clone(true);
+    if (this.busTemplates.length === 0) return;
+    for (let i = 0; i < 10; i++) {
+      const tpl = this.busTemplates[i % this.busTemplates.length];
+      const clone = tpl.clone(true);
       clone.userData.isGltfBus = true;
       this.pools.bus.push(clone);
     }
   }
 
-  public setTruckTemplate(template: THREE.Group): void {
-    this.truckTemplate = template;
+  public setBusTemplate(template: THREE.Group): void {
+    this.setBusTemplates([template]);
+  }
+
+  public addBusTemplates(templates: THREE.Group[]): void {
+    if (templates.length === 0) return;
+    this.busTemplates.push(...templates);
+    for (const tpl of templates) {
+      const frontClone = tpl.clone(true);
+      frontClone.userData.isGltfBus = true;
+      this.pools.bus.unshift(frontClone);
+
+      const midClone = tpl.clone(true);
+      midClone.userData.isGltfBus = true;
+      const midIdx = Math.floor(this.pools.bus.length * 0.5);
+      this.pools.bus.splice(midIdx, 0, midClone);
+    }
+  }
+
+  private cloneTruckTemplate(
+    template: THREE.Group,
+    flagKey: 'isGltfTruck' | 'isGltfHeavyTruck'
+  ): THREE.Group {
+    const clone = template.clone(true);
+    clone.userData = { ...template.userData, [flagKey]: true };
+    return clone;
+  }
+
+  public setTruckTemplates(templates: THREE.Group[]): void {
+    this.truckTemplates = [...templates];
+    this.truckTemplateCursor = 0;
     this.pools.truck = [];
-    for (let i = 0; i < 8; i++) {
-      const clone = template.clone(true);
-      clone.userData.isGltfTruck = true;
-      this.pools.truck.push(clone);
+    if (this.truckTemplates.length === 0) return;
+    for (let i = 0; i < 12; i++) {
+      const tpl = this.truckTemplates[i % this.truckTemplates.length];
+      this.pools.truck.push(this.cloneTruckTemplate(tpl, 'isGltfTruck'));
+    }
+  }
+
+  public addTruckTemplates(templates: THREE.Group[]): void {
+    if (templates.length === 0) return;
+    this.truckTemplates.push(...templates);
+    for (const tpl of templates) {
+      const clone = this.cloneTruckTemplate(tpl, 'isGltfTruck');
+      const insertIdx = Math.floor(this.pools.truck.length * 0.75);
+      this.pools.truck.splice(insertIdx, 0, clone);
+    }
+  }
+
+  public setTruckTemplate(template: THREE.Group): void {
+    this.setTruckTemplates([template]);
+  }
+
+  public setHeavyTruckTemplates(templates: THREE.Group[]): void {
+    this.heavyTruckTemplates = [...templates];
+    this.heavyTruckTemplateCursor = 0;
+    this.pools.heavy_truck = [];
+    if (this.heavyTruckTemplates.length === 0) return;
+    for (let i = 0; i < 10; i++) {
+      const tpl = this.heavyTruckTemplates[i % this.heavyTruckTemplates.length];
+      this.pools.heavy_truck.push(this.cloneTruckTemplate(tpl, 'isGltfHeavyTruck'));
+    }
+  }
+
+  public addHeavyTruckTemplates(templates: THREE.Group[]): void {
+    if (templates.length === 0) return;
+    this.heavyTruckTemplates.push(...templates);
+    for (const tpl of templates) {
+      const clone = this.cloneTruckTemplate(tpl, 'isGltfHeavyTruck');
+      const insertIdx = Math.floor(this.pools.heavy_truck.length * 0.65);
+      this.pools.heavy_truck.splice(insertIdx, 0, clone);
     }
   }
 
@@ -352,30 +556,51 @@ export class TrafficVisualPool {
     switch (type) {
       case 'motorbike':
         return this.buildMotorbike();
+      case 'reckless_moto':
+        return this.buildRecklessMoto();
       case 'flower_bike':
         return this.buildFlowerBike();
       case 'vendor':
         return this.buildVendor();
+      case 'tourist':
+        return this.buildTourist();
+      case 'office_worker':
+        return this.buildOfficeWorker();
       case 'car':
+        if (this.carTemplates.length > 0) {
+          const tpl = this.carTemplates[this.carTemplateCursor++ % this.carTemplates.length];
+          const clone = tpl.clone(true);
+          clone.userData.isGltfCar = true;
+          return clone;
+        }
         return this.buildCar();
       case 'taxi':
         return this.taxiTemplate
           ? this.cloneTaxiFromTemplate(this.taxiTemplate)
           : this.buildTaxiFallback();
       case 'bus':
-        if (this.busTemplate) {
-          const clone = this.busTemplate.clone(true);
+        if (this.busTemplates.length > 0) {
+          const tpl = this.busTemplates[this.busTemplateCursor++ % this.busTemplates.length];
+          const clone = tpl.clone(true);
           clone.userData.isGltfBus = true;
           return clone;
         }
         return this.buildBus();
       case 'truck':
-        if (this.truckTemplate) {
-          const clone = this.truckTemplate.clone(true);
-          clone.userData.isGltfTruck = true;
-          return clone;
+        if (this.truckTemplates.length > 0) {
+          const tpl = this.truckTemplates[this.truckTemplateCursor++ % this.truckTemplates.length];
+          return this.cloneTruckTemplate(tpl, 'isGltfTruck');
         }
         return this.buildTruck();
+      case 'heavy_truck':
+        if (this.heavyTruckTemplates.length > 0) {
+          const tpl =
+            this.heavyTruckTemplates[
+              this.heavyTruckTemplateCursor++ % this.heavyTruckTemplates.length
+            ];
+          return this.cloneTruckTemplate(tpl, 'isGltfHeavyTruck');
+        }
+        return this.buildHeavyTruck();
     }
   }
 
@@ -453,6 +678,112 @@ export class TrafficVisualPool {
     helmet.scale.set(0.14, 0.12, 0.14);
     helmet.position.set(0, 1.46, 0.04);
     g.add(helmet);
+
+    return this.finalizeGroup(g);
+  }
+
+  private buildRecklessMoto(): THREE.Group {
+    const g = new THREE.Group();
+    const spec = OBSTACLE_TYPES.reckless_moto; // halfW: 0.55, halfL: 1.18
+
+    for (const z of [-0.76, 0.76]) {
+      const w = new THREE.Mesh(this.geos.motoWheel, this.mats.tire);
+      w.position.set(0, 0.28, z);
+      g.add(w);
+    }
+
+    // Sporty red & black street fairing
+    const chassis = new THREE.Mesh(this.geos.box, this.mats.sportBlack);
+    chassis.scale.set(0.36, 0.36, 1.44);
+    chassis.position.set(0, 0.56, 0.04);
+    g.add(chassis);
+
+    const tank = new THREE.Mesh(this.geos.box, this.mats.sportCrimson);
+    tank.scale.set(0.38, 0.24, 0.54);
+    tank.position.set(0, 0.82, -0.18);
+    g.add(tank);
+
+    const cowl = new THREE.Mesh(this.geos.box, this.mats.sportCrimson);
+    cowl.scale.set(0.42, 0.44, 0.48);
+    cowl.position.set(0, 0.78, -0.58);
+    cowl.rotation.x = 0.35;
+    g.add(cowl);
+
+    const windscreen = new THREE.Mesh(this.geos.box, this.mats.glass);
+    windscreen.scale.set(0.34, 0.26, 0.16);
+    windscreen.position.set(0, 1.02, -0.56);
+    windscreen.rotation.x = 0.55;
+    g.add(windscreen);
+
+    const exhaust = new THREE.Mesh(this.geos.cyl, this.mats.chrome);
+    exhaust.scale.set(0.055, 0.68, 0.055);
+    exhaust.rotation.x = Math.PI / 2 - 0.18;
+    exhaust.position.set(0.22, 0.42, 0.56);
+    g.add(exhaust);
+
+    const seat = new THREE.Mesh(this.geos.box, this.mats.tire);
+    seat.scale.set(0.3, 0.1, 0.56);
+    seat.position.set(0, 0.8, 0.24);
+    g.add(seat);
+
+    const tail = new THREE.Mesh(this.geos.box, this.mats.tailRed);
+    tail.scale.set(0.18, 0.08, 0.06);
+    tail.position.set(0, 0.84, spec.halfL * 0.86);
+    g.add(tail);
+
+    const headlight = new THREE.Mesh(this.geos.sphere, this.mats.headLight);
+    headlight.scale.set(0.14, 0.09, 0.07);
+    headlight.position.set(0, 0.82, -0.78);
+    g.add(headlight);
+
+    // Per-instance amber warning blinker meshes for TrafficSpawner 0.55s pre-weave pulse
+    const blinkerMat = new THREE.MeshStandardMaterial({
+      color: 0xffaa00,
+      emissive: new THREE.Color(0xff9500),
+      emissiveIntensity: 0.4,
+      roughness: 0.25
+    });
+    this.disposables.push(blinkerMat);
+
+    const warningBlinkers: THREE.Mesh[] = [];
+    for (const sx of [-0.26, 0.26]) {
+      const rearPod = new THREE.Mesh(this.geos.box, blinkerMat);
+      rearPod.scale.set(0.1, 0.06, 0.06);
+      rearPod.position.set(sx, 0.86, spec.halfL * 0.82);
+      g.add(rearPod);
+      warningBlinkers.push(rearPod);
+
+      const frontPod = new THREE.Mesh(this.geos.box, blinkerMat);
+      frontPod.scale.set(0.1, 0.06, 0.06);
+      frontPod.position.set(sx, 0.84, -0.58);
+      g.add(frontPod);
+      warningBlinkers.push(frontPod);
+    }
+    g.userData.warningBlinkers = warningBlinkers;
+    g.userData.blinkerMaterial = blinkerMat;
+
+    // Crouched racing rider in black/red jacket + full-face helmet
+    const torso = new THREE.Mesh(this.geos.box, this.mats.sportBlack);
+    torso.scale.set(0.38, 0.5, 0.25);
+    torso.position.set(0, 1.04, 0.04);
+    torso.rotation.x = -0.48;
+    g.add(torso);
+
+    const stripe = new THREE.Mesh(this.geos.box, this.mats.sportCrimson);
+    stripe.scale.set(0.4, 0.12, 0.26);
+    stripe.position.set(0, 1.08, 0.02);
+    stripe.rotation.x = -0.48;
+    g.add(stripe);
+
+    const helmet = new THREE.Mesh(this.geos.sphere, this.mats.sportCrimson);
+    helmet.scale.set(0.145, 0.135, 0.17);
+    helmet.position.set(0, 1.28, -0.16);
+    g.add(helmet);
+
+    const visor = new THREE.Mesh(this.geos.box, this.mats.glass);
+    visor.scale.set(0.22, 0.08, 0.14);
+    visor.position.set(0, 1.28, -0.26);
+    g.add(visor);
 
     return this.finalizeGroup(g);
   }
@@ -583,6 +914,123 @@ export class TrafficVisualPool {
       produce.position.set(0.14, 0.62, bz);
       g.add(produce);
     }
+
+    return this.finalizeGroup(g);
+  }
+
+  private buildTourist(): THREE.Group {
+    const g = new THREE.Group();
+    const isCoral = this.pedestrianVariant++ % 2 === 0;
+    const shirtMat = isCoral ? this.mats.touristCoral : this.mats.touristSky;
+    const hatMat = isCoral ? this.mats.conicalHat : this.mats.helmetWhite;
+
+    for (const sx of [-0.09, 0.09]) {
+      const leg = new THREE.Mesh(this.geos.box, this.mats.touristShorts);
+      leg.scale.set(0.12, 0.42, 0.14);
+      leg.position.set(sx, 0.55, 0);
+      g.add(leg);
+
+      const calf = new THREE.Mesh(this.geos.box, this.mats.skin);
+      calf.scale.set(0.1, 0.34, 0.11);
+      calf.position.set(sx, 0.2, 0);
+      g.add(calf);
+
+      const shoe = new THREE.Mesh(this.geos.box, this.mats.helmetWhite);
+      shoe.scale.set(0.12, 0.08, 0.2);
+      shoe.position.set(sx, 0.04, -0.03);
+      g.add(shoe);
+    }
+
+    const torso = new THREE.Mesh(this.geos.box, shirtMat);
+    torso.scale.set(0.36, 0.54, 0.22);
+    torso.position.set(0, 1.02, 0);
+    g.add(torso);
+
+    // Travel backpack on back (+Z)
+    const backpack = new THREE.Mesh(this.geos.box, this.mats.backpackOlive);
+    backpack.scale.set(0.3, 0.44, 0.2);
+    backpack.position.set(0, 1.04, 0.2);
+    g.add(backpack);
+
+    // Camera/phone held slightly forward (-Z)
+    const armR = new THREE.Mesh(this.geos.box, this.mats.skin);
+    armR.scale.set(0.09, 0.34, 0.1);
+    armR.position.set(0.22, 1.04, -0.14);
+    armR.rotation.x = 0.75;
+    g.add(armR);
+
+    const cameraBody = new THREE.Mesh(this.geos.box, this.mats.tire);
+    cameraBody.scale.set(0.12, 0.08, 0.07);
+    cameraBody.position.set(0.16, 1.18, -0.28);
+    g.add(cameraBody);
+
+    const head = new THREE.Mesh(this.geos.sphere, this.mats.skin);
+    head.scale.setScalar(0.12);
+    head.position.set(0, 1.4, 0);
+    g.add(head);
+
+    // Sunhat / cap
+    const capCrown = new THREE.Mesh(this.geos.sphere, hatMat);
+    capCrown.scale.set(0.135, 0.09, 0.135);
+    capCrown.position.set(0, 1.47, 0);
+    g.add(capCrown);
+
+    const brim = new THREE.Mesh(this.geos.cyl, hatMat);
+    brim.scale.set(0.24, 0.025, 0.24);
+    brim.position.set(0, 1.45, -0.02);
+    g.add(brim);
+
+    return this.finalizeGroup(g);
+  }
+
+  private buildOfficeWorker(): THREE.Group {
+    const g = new THREE.Group();
+    const isWhiteShirt = this.pedestrianVariant++ % 2 === 0;
+    const shirtMat = isWhiteShirt ? this.mats.officeShirtWhite : this.mats.officeShirtBlue;
+
+    for (const sx of [-0.09, 0.09]) {
+      const leg = new THREE.Mesh(this.geos.box, this.mats.pants);
+      leg.scale.set(0.12, 0.74, 0.14);
+      leg.position.set(sx, 0.39, 0);
+      g.add(leg);
+
+      const shoe = new THREE.Mesh(this.geos.box, this.mats.tire);
+      shoe.scale.set(0.12, 0.07, 0.2);
+      shoe.position.set(sx, 0.035, -0.03);
+      g.add(shoe);
+    }
+
+    const shirt = new THREE.Mesh(this.geos.box, shirtMat);
+    shirt.scale.set(0.35, 0.54, 0.22);
+    shirt.position.set(0, 1.02, 0);
+    g.add(shirt);
+
+    const tie = new THREE.Mesh(this.geos.box, this.mats.carNavy);
+    tie.scale.set(0.055, 0.32, 0.03);
+    tie.position.set(0, 1.06, -0.115);
+    g.add(tie);
+
+    // Arms + leather briefcase carried on right side (+X)
+    for (const sx of [-0.22, 0.22]) {
+      const sleeve = new THREE.Mesh(this.geos.box, shirtMat);
+      sleeve.scale.set(0.09, 0.42, 0.1);
+      sleeve.position.set(sx, 1.02, 0);
+      g.add(sleeve);
+    }
+    const briefcase = new THREE.Mesh(this.geos.box, this.mats.briefcaseLeather);
+    briefcase.scale.set(0.11, 0.28, 0.36);
+    briefcase.position.set(0.28, 0.66, -0.02);
+    g.add(briefcase);
+
+    const head = new THREE.Mesh(this.geos.sphere, this.mats.skin);
+    head.scale.setScalar(0.115);
+    head.position.set(0, 1.39, 0);
+    g.add(head);
+
+    const hair = new THREE.Mesh(this.geos.sphere, this.mats.hairDark);
+    hair.scale.set(0.125, 0.1, 0.125);
+    hair.position.set(0, 1.44, 0.015);
+    g.add(hair);
 
     return this.finalizeGroup(g);
   }
@@ -891,6 +1339,125 @@ export class TrafficVisualPool {
     return this.finalizeGroup(g);
   }
 
+  private buildHeavyTruck(): THREE.Group {
+    const g = new THREE.Group();
+    const spec = OBSTACLE_TYPES.heavy_truck; // halfW: 1.26, halfL: 4.5
+    const variant = this.heavyTruckVariant++ % 2;
+    const cabMat = variant === 0 ? this.mats.heavyCabRed : this.mats.heavyCabWhite;
+    const containerMat = variant === 0 ? this.mats.containerBlue : this.mats.containerRust;
+
+    const width = spec.halfW * 1.9; // ~2.39m
+    const length = spec.halfL * 1.92; // ~8.64m
+
+    // 8 heavy wheels: front steer axle + tandem twin rear axles
+    for (const sx of [-width * 0.45, width * 0.45]) {
+      for (const sz of [-length * 0.38, length * 0.04, length * 0.24, length * 0.41]) {
+        const w = new THREE.Mesh(this.geos.busWheel, this.mats.tire);
+        w.scale.set(1.08, 1.08, 1.08);
+        w.position.set(sx, 0.54, sz);
+        g.add(w);
+      }
+    }
+
+    // Long heavy-duty steel chassis rails
+    const frame = new THREE.Mesh(this.geos.box, this.mats.tire);
+    frame.scale.set(width * 0.78, 0.32, length * 0.96);
+    frame.position.set(0, 0.68, 0.02);
+    g.add(frame);
+
+    // Tall long-haul cab (-Z)
+    const cab = new THREE.Mesh(this.geos.box, cabMat);
+    cab.scale.set(width * 0.94, 2.08, 2.05);
+    cab.position.set(0, 1.82, -length * 0.37);
+    g.add(cab);
+
+    const windshield = new THREE.Mesh(this.geos.box, this.mats.glass);
+    windshield.scale.set(width * 0.88, 0.82, 1.96);
+    windshield.position.set(0, 2.24, -length * 0.38);
+    g.add(windshield);
+
+    const visor = new THREE.Mesh(this.geos.box, this.mats.tire);
+    visor.scale.set(width * 0.92, 0.16, 0.24);
+    visor.position.set(0, 2.74, -length * 0.49);
+    g.add(visor);
+
+    const deflector = new THREE.Mesh(this.geos.box, cabMat);
+    deflector.scale.set(width * 0.86, 0.56, 1.25);
+    deflector.position.set(0, 3.12, -length * 0.32);
+    deflector.rotation.x = 0.24;
+    g.add(deflector);
+
+    const grille = new THREE.Mesh(this.geos.box, this.mats.chrome);
+    grille.scale.set(width * 0.68, 0.62, 0.07);
+    grille.position.set(0, 1.32, -length * 0.49);
+    g.add(grille);
+
+    const frontBumper = new THREE.Mesh(this.geos.box, this.mats.chrome);
+    frontBumper.scale.set(width * 0.98, 0.26, 0.16);
+    frontBumper.position.set(0, 0.72, -length * 0.5);
+    g.add(frontBumper);
+
+    for (const sx of [-width * 0.36, width * 0.36]) {
+      const head = new THREE.Mesh(this.geos.box, this.mats.headLight);
+      head.scale.set(0.36, 0.22, 0.08);
+      head.position.set(sx, 1.06, -length * 0.495);
+      g.add(head);
+
+      const mirror = new THREE.Mesh(this.geos.box, this.mats.chrome);
+      mirror.scale.set(0.09, 0.42, 0.14);
+      mirror.position.set(sx * 1.48, 2.18, -length * 0.44);
+      g.add(mirror);
+    }
+
+    // Tall ISO shipping container cargo box (+Z)
+    const cargoLen = length * 0.71;
+    const cargoCenterZ = 1.06;
+    const container = new THREE.Mesh(this.geos.box, containerMat);
+    container.scale.set(width * 1.02, 2.66, cargoLen);
+    container.position.set(0, 2.28, cargoCenterZ);
+    g.add(container);
+
+    // Corrugated container ribs & hazard safety band
+    const stripe = new THREE.Mesh(this.geos.box, this.mats.truckStripeAmber);
+    stripe.scale.set(width * 1.04, 0.16, cargoLen + 0.04);
+    stripe.position.set(0, 1.1, cargoCenterZ);
+    g.add(stripe);
+
+    for (let r = -3; r <= 3; r++) {
+      const rib = new THREE.Mesh(this.geos.box, this.mats.truckRib);
+      rib.scale.set(width * 1.05, 2.54, 0.1);
+      rib.position.set(0, 2.28, cargoCenterZ + r * (cargoLen * 0.14));
+      g.add(rib);
+    }
+
+    // Rear container locking bars & dual taillights
+    const rearBumper = new THREE.Mesh(this.geos.box, this.mats.chrome);
+    rearBumper.scale.set(width * 0.96, 0.18, 0.14);
+    rearBumper.position.set(0, 0.6, length * 0.49);
+    g.add(rearBumper);
+
+    for (const sx of [-width * 0.2, width * 0.2]) {
+      const lockBar = new THREE.Mesh(this.geos.cyl, this.mats.chrome);
+      lockBar.scale.set(0.035, 2.45, 0.035);
+      lockBar.position.set(sx, 2.28, cargoCenterZ + cargoLen * 0.5 + 0.03);
+      g.add(lockBar);
+    }
+
+    for (const sx of [-width * 0.38, width * 0.38]) {
+      const tail = new THREE.Mesh(this.geos.box, this.mats.tailRed);
+      tail.scale.set(0.38, 0.22, 0.06);
+      tail.position.set(sx, 0.96, length * 0.5 + 0.02);
+      g.add(tail);
+
+      const topClearance = new THREE.Mesh(this.geos.box, this.mats.truckStripeAmber);
+      topClearance.scale.set(0.18, 0.14, 0.06);
+      topClearance.position.set(sx, 3.48, length * 0.5 + 0.02);
+      g.add(topClearance);
+    }
+
+    return this.finalizeGroup(g);
+  }
+
   private disposeTemplate(template: THREE.Group | null): void {
     if (!template) return;
     const geos = new Set<THREE.BufferGeometry>();
@@ -928,10 +1495,22 @@ export class TrafficVisualPool {
     }
     this.disposeTemplate(this.taxiTemplate);
     this.taxiTemplate = null;
-    this.disposeTemplate(this.busTemplate);
-    this.busTemplate = null;
-    this.disposeTemplate(this.truckTemplate);
-    this.truckTemplate = null;
+    for (const carTpl of this.carTemplates) {
+      this.disposeTemplate(carTpl);
+    }
+    this.carTemplates = [];
+    for (const busTpl of this.busTemplates) {
+      this.disposeTemplate(busTpl);
+    }
+    this.busTemplates = [];
+    for (const truckTpl of this.truckTemplates) {
+      this.disposeTemplate(truckTpl);
+    }
+    this.truckTemplates = [];
+    for (const heavyTruckTpl of this.heavyTruckTemplates) {
+      this.disposeTemplate(heavyTruckTpl);
+    }
+    this.heavyTruckTemplates = [];
     for (const item of this.disposables) {
       item.dispose();
     }

@@ -28,7 +28,7 @@ describe('roadMath', () => {
     expect(getRoadProgress(500, -100)).toBe(0);
   });
 
-  it('keeps road center X continuous and finite across all 3 stages', () => {
+  it('keeps road center X continuous and finite across all 9 stages', () => {
     for (const stage of STAGES) {
       expect(getRoadCenterX(stage.id, -20)).toBeCloseTo(getRoadCenterX(stage.id, 0), 6);
 
@@ -44,8 +44,8 @@ describe('roadMath', () => {
     }
   });
 
-  it('keeps Stage 1 and Stage 2 completely flat at y = 0', () => {
-    for (const stageId of [1, 2] as const) {
+  it('keeps non-overpass stages (all except Stage 3) completely flat at y = 0', () => {
+    for (const stageId of [1, 2, 4, 5, 6, 7, 8, 9] as const) {
       const stage = STAGES.find((s) => s.id === stageId)!;
       for (let d = 0; d <= stage.length; d += 25) {
         expect(getRoadElevationY(stageId, d)).toBe(0);
@@ -85,7 +85,7 @@ describe('roadMath', () => {
     expect(getRoadSlope(3, 1220)).toBeLessThan(-0.01);
   });
 
-  it('computes continuous finite road tangent yaw across all 3 stages', () => {
+  it('computes continuous finite road tangent yaw across all 9 stages', () => {
     for (const stage of STAGES) {
       let prevYaw = getRoadTangentYaw(stage.id, 0);
       for (let d = 1; d <= stage.length; d += 5) {

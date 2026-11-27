@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 
-function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D | null] {
+function makeCanvas(
+  w: number,
+  h: number
+): [HTMLCanvasElement | null, CanvasRenderingContext2D | null] {
+  if (typeof document === 'undefined') return [null, null];
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -8,10 +12,16 @@ function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingCo
 }
 
 function finalizeTexture(
-  canvas: HTMLCanvasElement,
+  canvas: HTMLCanvasElement | null,
   repeatX = 1,
   repeatY = 1
 ): THREE.CanvasTexture {
+  if (!canvas) {
+    const fallback = new THREE.DataTexture(new Uint8Array([140, 132, 118, 255]), 1, 1, THREE.RGBAFormat);
+    fallback.colorSpace = THREE.SRGBColorSpace;
+    fallback.needsUpdate = true;
+    return fallback as unknown as THREE.CanvasTexture;
+  }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;

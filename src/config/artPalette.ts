@@ -201,6 +201,54 @@ export const STAGE_ATMOSPHERES: Record<1 | 2 | 3, StageAtmosphere> = {
   }
 };
 
+export const THEME_ATMOSPHERES: Record<
+  'overpass_avenue' | 'tree_boulevard' | 'old_quarter',
+  StageAtmosphere
+> = {
+  // Stages 1..3 (Bài 1 · 6 làn): Crisp sunny modern avenue & clear urban horizon
+  overpass_avenue: {
+    skyTop: 0x457fa8,
+    skyHorizon: 0xf4cf89,
+    fogColor: 0xc9c4b8,
+    fogNear: 75,
+    fogFar: 320,
+    sunColor: 0xffd590,
+    sunIntensity: 2.85,
+    sunElevation: 24,
+    ambientIntensity: 0.46
+  },
+  // Stages 4..6 (Bài 2 · 4 làn): Lush ancient tree canopy with warm slanted afternoon shade
+  tree_boulevard: {
+    skyTop: 0x3d738f,
+    skyHorizon: 0xedd085,
+    fogColor: 0xbec4ab,
+    fogNear: 68,
+    fogFar: 280,
+    sunColor: 0xffcc7a,
+    sunIntensity: 2.75,
+    sunElevation: 20,
+    ambientIntensity: 0.48
+  },
+  // Stages 7..9 (Bài 3 · 2 làn): Golden Old Quarter sunset warmth & intimate misty alley depth
+  old_quarter: {
+    skyTop: 0x42668e,
+    skyHorizon: 0xf2ae6b,
+    fogColor: 0xcab69e,
+    fogNear: 62,
+    fogFar: 250,
+    sunColor: 0xffbe73,
+    sunIntensity: 2.95,
+    sunElevation: 16,
+    ambientIntensity: 0.44
+  }
+};
+
+export function getStageAtmosphere(stageId: number): StageAtmosphere {
+  if (stageId <= 3) return THEME_ATMOSPHERES.overpass_avenue;
+  if (stageId <= 6) return THEME_ATMOSPHERES.tree_boulevard;
+  return THEME_ATMOSPHERES.old_quarter;
+}
+
 export interface RetroUiTokens {
   bg: string;
   card: string;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DIFFICULTIES, OBSTACLE_TYPES } from '../config/gameConfig';
+import { DIFFICULTIES, OBSTACLE_TYPES, STAGES } from '../config/gameConfig';
 import {
   applyCollisionPenalty,
   applyStageReward,
@@ -54,24 +54,26 @@ describe('economy', () => {
     expect(isBankrupt(Number.POSITIVE_INFINITY)).toBe(true);
   });
 
-  it('grants stage completion reward and perfect-run bonus only when hitsInStage === 0', () => {
+  it('grants stage completion reward scaled by rewardScale plus perfect-run bonus only when hitsInStage === 0', () => {
     const perfectEasy = applyStageReward(400_000, 1, 'easy', 0);
-    expect(perfectEasy.baseReward).toBe(DIFFICULTIES.easy.stageReward);
+    expect(perfectEasy.baseReward).toBe(Math.round(DIFFICULTIES.easy.stageReward * STAGES[0].rewardScale));
     expect(perfectEasy.perfectBonus).toBe(DIFFICULTIES.easy.perfectBonus);
     expect(perfectEasy.totalReward).toBe(170_000);
     expect(perfectEasy.wallet).toBe(570_000);
 
     const hitMedium = applyStageReward(275_000, 2, 'medium', 2);
-    expect(hitMedium.baseReward).toBe(DIFFICULTIES.medium.stageReward);
+    const expectedMedBase = Math.round(DIFFICULTIES.medium.stageReward * STAGES[1].rewardScale);
+    expect(hitMedium.baseReward).toBe(expectedMedBase);
     expect(hitMedium.perfectBonus).toBe(0);
-    expect(hitMedium.totalReward).toBe(150_000);
-    expect(hitMedium.wallet).toBe(425_000);
+    expect(hitMedium.totalReward).toBe(expectedMedBase);
+    expect(hitMedium.wallet).toBe(275_000 + expectedMedBase);
 
     const perfectHard = applyStageReward(100_000, 3, 'hard', 0);
-    expect(perfectHard.baseReward).toBe(DIFFICULTIES.hard.stageReward);
+    const expectedHardBase = Math.round(DIFFICULTIES.hard.stageReward * STAGES[2].rewardScale);
+    expect(perfectHard.baseReward).toBe(expectedHardBase);
     expect(perfectHard.perfectBonus).toBe(DIFFICULTIES.hard.perfectBonus);
-    expect(perfectHard.totalReward).toBe(300_000);
-    expect(perfectHard.wallet).toBe(400_000);
+    expect(perfectHard.totalReward).toBe(expectedHardBase + DIFFICULTIES.hard.perfectBonus);
+    expect(perfectHard.wallet).toBe(100_000 + expectedHardBase + DIFFICULTIES.hard.perfectBonus);
   });
 
   it('formats VND amounts cleanly with dot thousands separators', () => {

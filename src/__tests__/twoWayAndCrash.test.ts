@@ -4,7 +4,8 @@ import {
   LANES,
   ROAD_WIDTH,
   STAGES,
-  type DifficultyId
+  type DifficultyId,
+  type StageId
 } from '../config/gameConfig.ts';
 import {
   DEFAULT_CRASH_RIDER,
@@ -212,8 +213,10 @@ describe('VF e34 Taxi per-stage 2-3 cap (trafficRules & TrafficSpawner)', () => 
       setBusTemplate: () => {},
       setTruckTemplate: () => {},
       hasTaxiTemplate: () => true,
+      hasCarTemplates: () => true,
       hasBusTemplate: () => true,
       hasTruckTemplate: () => true,
+      hasHeavyTruckTemplate: () => true,
       dispose: () => {}
     }) as unknown as TrafficVisualPool;
 
@@ -239,13 +242,13 @@ describe('VF e34 Taxi per-stage 2-3 cap (trafficRules & TrafficSpawner)', () => 
     }
   });
 
-  it('spawns strictly 2-3 VF e34 taxis per stage across all stages and resets cleanly', () => {
-    const cases: Array<{ stageId: 1 | 2 | 3; difficultyId: DifficultyId }> = [
+  it('spawns strictly 2-3 VF e34 taxis per stage across representative 6/4/2-lane stages and resets cleanly', () => {
+    const cases: Array<{ stageId: StageId; difficultyId: DifficultyId }> = [
       { stageId: 1, difficultyId: 'easy' },
-      { stageId: 1, difficultyId: 'medium' },
-      { stageId: 1, difficultyId: 'hard' },
       { stageId: 2, difficultyId: 'medium' },
-      { stageId: 3, difficultyId: 'hard' }
+      { stageId: 4, difficultyId: 'medium' },
+      { stageId: 7, difficultyId: 'medium' },
+      { stageId: 8, difficultyId: 'hard' }
     ];
 
     const scene = new THREE.Scene();
@@ -278,10 +281,15 @@ describe('VF e34 Taxi per-stage 2-3 cap (trafficRules & TrafficSpawner)', () => 
     }
 
     // Confirm reset clears stage taxi counter back to initial state
+    spawner.reset(7, 'medium');
+    const resetStats7 = spawner.getTaxiStageStats();
+    expect(resetStats7.quota).toBe(2);
+    expect(resetStats7.spawnedInStage).toBe(1);
+
     spawner.reset(1, 'medium');
-    const resetStats = spawner.getTaxiStageStats();
-    expect(resetStats.quota).toBe(2);
-    expect(resetStats.spawnedInStage).toBe(1);
+    const resetStats1 = spawner.getTaxiStageStats();
+    expect(resetStats1.quota).toBe(3);
+    expect(resetStats1.spawnedInStage).toBe(1);
 
     spawner.dispose();
   });

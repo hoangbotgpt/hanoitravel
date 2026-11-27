@@ -1,12 +1,17 @@
 import * as THREE from 'three';
 import { HANOI_PALETTE } from '../config/artPalette.ts';
-import { getStageSpec } from '../config/gameConfig.ts';
+import {
+  getStageSpec,
+  type DestinationKey,
+  type StageId
+} from '../config/gameConfig.ts';
 import {
   distanceToWorldZ,
   getRoadCenterX,
   getRoadElevationY,
   getRoadTangentYaw
 } from '../core/roadMath.ts';
+import { getStageRouteFeatures } from '../core/routeFeatures.ts';
 import {
   createClockTowerShaftTexture,
   createColonialFacadeTexture,
@@ -19,10 +24,12 @@ import {
   createTerracottaRoofTexture,
   createTreeBarkTexture
 } from './hanoiTextures.ts';
+import {
+  disposeLandmarkObject,
+  type LandmarkGlbConfig
+} from './landmarkLoader.ts';
 
-export interface AnimatedFlagInstance {
-  mesh: THREE.InstancedMesh;
-  index: number;
+export interface AnimatedFlagRecord {
   x: number;
   y: number;
   z: number;
@@ -36,8 +43,18 @@ export interface AnimatedFlagInstance {
 export interface LandmarksBuildResult {
   group: THREE.Group;
   update: (playerDistance: number, elapsedTime: number) => void;
+  setHeroGlb: (glb: THREE.Group, config: LandmarkGlbConfig) => void;
+  getStreamingStats: () => {
+    activeSceneryChunks: number;
+    drawCallObjects: number;
+    heroGlbLoaded: boolean;
+  };
   dispose: () => void;
 }
+
+const SCENERY_CHUNK_LEN = 60;
+const STREAM_BACK = 60;
+const STREAM_AHEAD = 360;
 
 function createPrng(seedInit: number): () => number {
   let seed = seedInit >>> 0;
@@ -47,7 +64,17 @@ function createPrng(seedInit: number): () => number {
   };
 }
 
-function createFlagTexture(): THREE.CanvasTexture {
+function createHeadlessTexture(r: number, g: number, b: number): THREE.Texture {
+  const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1, THREE.RGBAFormat);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function createFlagTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(218, 37, 29);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 192;
   canvas.height = 128;
@@ -86,7 +113,10 @@ function createBannerTexture(
   titleHex = '#f6eedc',
   width = 1280,
   height = 176
-): THREE.CanvasTexture {
+): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(91, 58, 34);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -105,13 +135,13 @@ function createBannerTexture(
     const subSize = Math.round(height * 0.18);
 
     ctx.fillStyle = titleHex;
-    ctx.font = `700 ${titleSize}px "Segoe UI", "Roboto", system-ui, sans-serif`;
+    ctx.font = `700 ${titleSize}px "Be Vietnam Pro", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(title, width / 2, height * 0.38, maxTextWidth);
 
     ctx.fillStyle = borderHex;
-    ctx.font = `700 ${subSize}px "Segoe UI", "Roboto", system-ui, sans-serif`;
+    ctx.font = `700 ${subSize}px "Be Vietnam Pro", sans-serif`;
     ctx.fillText(subtitle, width / 2, height * 0.72, maxTextWidth);
   }
   const tex = new THREE.CanvasTexture(canvas);
@@ -120,7 +150,10 @@ function createBannerTexture(
   return tex;
 }
 
-function createKhueVanCacBannerTexture(): THREE.CanvasTexture {
+function createKhueVanCacBannerTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(246, 238, 220);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 128;
   canvas.height = 128;
@@ -166,7 +199,10 @@ function createKhueVanCacBannerTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function createClockFaceTexture(): THREE.CanvasTexture {
+function createClockFaceTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(35, 38, 41);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 256;
@@ -198,7 +234,7 @@ function createClockFaceTexture(): THREE.CanvasTexture {
     }
 
     ctx.fillStyle = '#f6eedc';
-    ctx.font = 'bold 24px Georgia, serif';
+    ctx.font = '700 24px "Be Vietnam Pro", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('12', 128, 56);
@@ -267,34 +303,198 @@ function createGateArch(
   return arch;
 }
 
-/**
- * Builds Stage 1 Landmark: Ô Quan Chưởng historic arched gate with textured ancient stone,
- * curved semicircular voussoir arch ring, side pedestrian arches, and 2-tier roof watchtower.
- */
+interface FinishHologramHandle {
+  group: THREE.Group;
+  textMesh: THREE.Mesh;
+  textMat: THREE.MeshBasicMaterial;
+  baseY: number;
+  beamMats: THREE.MeshBasicMaterial[];
+}
+
+function createHologramBannerTexture(
+  badgeLabel: string,
+  title: string,
+  subtitle: string,
+  accentHex: string
+): THREE.Texture {
+  if (typeof document === 'undefined') {
+    return createHeadlessTexture(232, 168, 56);
+  }
+  const width = 1280;
+  const height = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, width, height);
+
+    // Subtle horizontal holographic scanlines (transparent background lets destination GLB shine through)
+    ctx.fillStyle = 'rgba(255, 232, 160, 0.08)';
+    for (let y = 14; y < height - 14; y += 12) {
+      ctx.fillRect(42, y, width - 84, 2);
+    }
+
+    // Glowing HUD corner brackets
+    const padX = 28;
+    const padY = 20;
+    const arm = 48;
+    ctx.strokeStyle = accentHex;
+    ctx.lineWidth = 6;
+    ctx.shadowColor = accentHex;
+    ctx.shadowBlur = 16;
+
+    const corners: Array<[number, number, number, number]> = [
+      [padX, padY, 1, 1],
+      [width - padX, padY, -1, 1],
+      [padX, height - padY, 1, -1],
+      [width - padX, height - padY, -1, -1]
+    ];
+    for (const [cx, cy, dx, dy] of corners) {
+      ctx.beginPath();
+      ctx.moveTo(cx + dx * arm, cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + dy * arm);
+      ctx.stroke();
+    }
+
+    // Top badge pill text
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(10, 14, 18, 0.88)';
+    ctx.shadowBlur = 12;
+
+    ctx.font = '800 28px "Be Vietnam Pro", sans-serif';
+    ctx.fillStyle = accentHex;
+    ctx.strokeStyle = 'rgba(12, 16, 22, 0.88)';
+    ctx.lineWidth = 5;
+    ctx.strokeText(badgeLabel, width / 2, 46, width - 160);
+    ctx.fillText(badgeLabel, width / 2, 46, width - 160);
+
+    // Main translucent glowing hologram title
+    ctx.font = '800 72px "Be Vietnam Pro", sans-serif';
+    ctx.lineWidth = 9;
+    ctx.strokeStyle = 'rgba(10, 14, 20, 0.9)';
+    ctx.strokeText(title, width / 2, 128, width - 120);
+    ctx.shadowColor = accentHex;
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = 'rgba(255, 248, 228, 0.94)';
+    ctx.fillText(title, width / 2, 128, width - 120);
+
+    // Subtitle
+    ctx.shadowColor = 'rgba(10, 14, 20, 0.88)';
+    ctx.shadowBlur = 10;
+    ctx.font = '700 30px "Be Vietnam Pro", sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeText(subtitle, width / 2, 204, width - 140);
+    ctx.fillStyle = accentHex;
+    ctx.fillText(subtitle, width / 2, 204, width - 140);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function createFinishHologram(
+  roadWidth: number,
+  badgeLabel: string,
+  title: string,
+  subtitle: string,
+  accentHex: string,
+  track: <T extends { dispose: () => void }>(res: T) => T
+): FinishHologramHandle {
+  const roadHalfW = roadWidth * 0.5;
+  const group = new THREE.Group();
+  group.name = 'FinishHologram';
+  group.userData.isFinishHologram = true;
+
+  const baseY = Math.min(8.2, Math.max(6.2, roadWidth * 0.42));
+  const bannerWidth = Math.min(18.5, Math.max(9.6, roadWidth * 0.94));
+  const holoTex = track(createHologramBannerTexture(badgeLabel, title, subtitle, accentHex));
+  const textMat = track(
+    new THREE.MeshBasicMaterial({
+      map: holoTex,
+      transparent: true,
+      opacity: 0.84,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  const textMesh = new THREE.Mesh(track(new THREE.PlaneGeometry(bannerWidth, 2.25)), textMat);
+  textMesh.position.set(0, baseY, 0);
+  textMesh.renderOrder = 6;
+  group.add(textMesh);
+
+  // Two translucent holographic light-beam pillars flanking the road edge (no solid obstruction)
+  const accentColor = new THREE.Color(accentHex);
+  const beamMat = track(
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.22,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  const beamGeo = track(new THREE.PlaneGeometry(0.45, 5.4));
+  for (const side of [-1, 1] as const) {
+    const xPos = side * (roadHalfW + 0.65);
+    const beamA = new THREE.Mesh(beamGeo, beamMat);
+    beamA.position.set(xPos, 2.7, 0);
+    beamA.renderOrder = 5;
+    group.add(beamA);
+
+    const beamB = new THREE.Mesh(beamGeo, beamMat);
+    beamB.position.set(xPos, 2.7, 0);
+    beamB.rotation.y = Math.PI / 2;
+    beamB.renderOrder = 5;
+    group.add(beamB);
+  }
+
+  // Thin additive floor light strip at the finish line
+  const floorMat = track(
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.28,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  const floorGeo = track(new THREE.PlaneGeometry(roadWidth - 0.6, 1.35));
+  floorGeo.rotateX(-Math.PI / 2);
+  const floorStrip = new THREE.Mesh(floorGeo, floorMat);
+  floorStrip.position.set(0, 0.06, 0);
+  floorStrip.renderOrder = 5;
+  group.add(floorStrip);
+
+  return {
+    group,
+    textMesh,
+    textMat,
+    baseY,
+    beamMats: [beamMat, floorMat]
+  };
+}
+
 function buildOQuanChuongGate(
   roadWidth: number,
-  stoneTex: THREE.CanvasTexture,
-  roofTex: THREE.CanvasTexture,
+  stoneTex: THREE.Texture,
+  roofTex: THREE.Texture,
+  flagTex: THREE.Texture,
   track: <T extends { dispose: () => void }>(res: T) => T
 ): THREE.Group {
   const roadHalfW = roadWidth * 0.5;
   const gate = new THREE.Group();
   gate.name = 'Landmark_OQuanChuong';
 
-  const stoneMat = track(
-    new THREE.MeshStandardMaterial({
-      map: stoneTex,
-      roughness: 0.9
-    })
-  );
-  const darkArchMat = track(
-    new THREE.MeshStandardMaterial({ color: 0x3b3126, roughness: 0.95 })
-  );
-  const roofMat = track(
-    new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.78 })
-  );
+  const stoneMat = track(new THREE.MeshStandardMaterial({ map: stoneTex, roughness: 0.9 }));
+  const darkArchMat = track(new THREE.MeshStandardMaterial({ color: 0x3b3126, roughness: 0.95 }));
+  const roofMat = track(new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.78 }));
 
-  // Massive outer gate piers flanking the narrow 7.4m carriageway
   const pierGeo = track(new THREE.BoxGeometry(2.6, 7.6, 3.6));
   for (const side of [-1, 1] as const) {
     const pier = new THREE.Mesh(pierGeo, stoneMat);
@@ -303,7 +503,6 @@ function buildOQuanChuongGate(
     pier.receiveShadow = true;
     gate.add(pier);
 
-    // Side pedestrian bastion wings with arched passage openings
     const wing = new THREE.Mesh(track(new THREE.BoxGeometry(4.6, 6.4, 2.9)), stoneMat);
     wing.position.set(side * (roadHalfW + 5.1), 3.2, 0);
     wing.castShadow = true;
@@ -322,7 +521,6 @@ function buildOQuanChuongGate(
     sideArchTop.position.set(side * (roadHalfW + 5.0), 3.0, 0);
     gate.add(sideArchTop);
 
-    // Extending ancient mossy stone curtain wall sealing left/right flanks into Old Quarter blocks
     const curtainWall = new THREE.Mesh(track(new THREE.BoxGeometry(10.5, 5.6, 2.5)), stoneMat);
     curtainWall.position.set(side * (roadHalfW + 12.2), 2.8, 0);
     curtainWall.castShadow = true;
@@ -334,7 +532,6 @@ function buildOQuanChuongGate(
     gate.add(wallCoping);
   }
 
-  // Semicircular Stone Vault Archway across the narrow carriageway (clear height >= 5.2m)
   const archSpanR = roadHalfW + 0.85;
   const archSpringY = 4.35;
   const archSegs = 12;
@@ -350,17 +547,12 @@ function buildOQuanChuongGate(
     gate.add(vBlock);
   }
 
-  // Upper masonry spandrel & cornice beam above the arch ring
   const lintelWidth = roadWidth + 7.2;
-  const lintel = new THREE.Mesh(
-    track(new THREE.BoxGeometry(lintelWidth, 1.65, 3.5)),
-    stoneMat
-  );
+  const lintel = new THREE.Mesh(track(new THREE.BoxGeometry(lintelWidth, 1.65, 3.5)), stoneMat);
   lintel.position.set(0, 7.25, 0);
   lintel.castShadow = true;
   gate.add(lintel);
 
-  // Perforated crenellated balustrade parapet across top
   const parapetHalf = roadHalfW + 4.8;
   const parapetPostGeo = track(new THREE.BoxGeometry(0.5, 0.9, 0.48));
   for (let x = -parapetHalf; x <= parapetHalf; x += 1.45) {
@@ -375,7 +567,6 @@ function buildOQuanChuongGate(
   rail.position.set(0, 9.0, 1.5);
   gate.add(rail);
 
-  // Upper Watchtower Pavilion (Vọng lâu) with genuine see-through sky archway & curved terracotta roofs
   const towerPierGeo = track(new THREE.BoxGeometry(1.9, 3.0, 3.2));
   for (const side of [-1, 1] as const) {
     const tPier = new THREE.Mesh(towerPierGeo, stoneMat);
@@ -392,25 +583,18 @@ function buildOQuanChuongGate(
   towerLintel.position.set(0, 11.02, 0);
   gate.add(towerLintel);
 
-  const lowerRoof = new THREE.Mesh(
-    track(new THREE.ConeGeometry(5.1, 1.45, 4)),
-    roofMat
-  );
+  const lowerRoof = new THREE.Mesh(track(new THREE.ConeGeometry(5.1, 1.45, 4)), roofMat);
   lowerRoof.rotation.y = Math.PI / 4;
   lowerRoof.scale.set(1.18, 1, 0.78);
   lowerRoof.position.set(0, 12.0, 0);
   gate.add(lowerRoof);
 
-  const upperRoof = new THREE.Mesh(
-    track(new THREE.ConeGeometry(3.4, 1.25, 4)),
-    roofMat
-  );
+  const upperRoof = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 1.25, 4)), roofMat);
   upperRoof.rotation.y = Math.PI / 4;
   upperRoof.scale.set(1.15, 1, 0.78);
   upperRoof.position.set(0, 13.1, 0);
   gate.add(upperRoof);
 
-  // Red flag with yellow star atop Ô Quan Chưởng watchtower (clear of top HUD bar)
   const oqcPole = new THREE.Mesh(
     track(new THREE.CylinderGeometry(0.055, 0.075, 1.6, 8)),
     track(new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.clockTowerWhite, roughness: 0.5 }))
@@ -418,15 +602,13 @@ function buildOQuanChuongGate(
   oqcPole.position.set(0, 13.35, 0.8);
   gate.add(oqcPole);
 
-  const oqcFlagTex = track(createFlagTexture());
   const oqcFlag = new THREE.Mesh(
     track(new THREE.PlaneGeometry(1.9, 1.2)),
-    track(new THREE.MeshBasicMaterial({ map: oqcFlagTex, side: THREE.DoubleSide }))
+    track(new THREE.MeshBasicMaterial({ map: flagTex, side: THREE.DoubleSide }))
   );
   oqcFlag.position.set(0.95, 13.85, 0.8);
   gate.add(oqcFlag);
 
-  // Historic Stone Plaque centered above arch
   const plaqueTex = track(
     createBannerTexture(
       'Ô QUAN CHƯỞNG',
@@ -448,141 +630,17 @@ function buildOQuanChuongGate(
   return gate;
 }
 
-/**
- * Builds Stage 1 End Landmark: Tháp Đồng Hồ Bờ Hồ & textured Bưu Điện Hà Nội.
- */
-function buildClockTowerLandmark(
-  colonialTex: THREE.CanvasTexture,
-  roofTex: THREE.CanvasTexture,
-  shaftTex: THREE.CanvasTexture,
-  track: <T extends { dispose: () => void }>(res: T) => T
-): THREE.Group {
-  const tower = new THREE.Group();
-  tower.name = 'Landmark_ThapDongHo';
-
-  const whiteMat = track(
-    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.clockTowerWhite, roughness: 0.7 })
-  );
-  const shaftMat = track(
-    new THREE.MeshStandardMaterial({ map: shaftTex, roughness: 0.74 })
-  );
-  const trimMat = track(
-    new THREE.MeshStandardMaterial({ color: 0xc9c3b6, roughness: 0.78 })
-  );
-  const roofMat = track(
-    new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.76 })
-  );
-  const clockTex = track(createClockFaceTexture());
-  const clockMat = track(new THREE.MeshBasicMaterial({ map: clockTex }));
-
-  // Textured Colonial Post Office wings & facade behind the clock tower
-  const buildingMat = track(
-    new THREE.MeshStandardMaterial({ map: colonialTex, roughness: 0.8 })
-  );
-  const baseBuilding = new THREE.Mesh(track(new THREE.BoxGeometry(38, 11.2, 11)), buildingMat);
-  baseBuilding.position.set(0, 5.6, -4.5);
-  baseBuilding.castShadow = true;
-  tower.add(baseBuilding);
-
-  const baseCornice = new THREE.Mesh(track(new THREE.BoxGeometry(39.2, 0.9, 11.8)), whiteMat);
-  baseCornice.position.set(0, 11.5, -4.5);
-  tower.add(baseCornice);
-
-  const baseRoof = new THREE.Mesh(track(new THREE.BoxGeometry(37.6, 1.6, 10.6)), roofMat);
-  baseRoof.position.set(0, 12.6, -4.5);
-  tower.add(baseRoof);
-
-  const postSignTex = track(
-    createBannerTexture(
-      'BƯU ĐIỆN HÀ NỘI',
-      'HỒ HOÀN KIẾM · TRUNG TÂM THỦ ĐÔ',
-      '#ead9b5',
-      '#5b3a22',
-      '#5b3a22',
-      1024,
-      192
-    )
-  );
-  const postSign = new THREE.Mesh(
-    track(new THREE.PlaneGeometry(8.4, 1.45)),
-    track(new THREE.MeshBasicMaterial({ map: postSignTex }))
-  );
-  postSign.position.set(11.6, 9.2, 1.12);
-  tower.add(postSign);
-
-  // Tall 4-pillar textured clock shaft with recessed panels & base/collar cornices
-  const towerPlinth = new THREE.Mesh(track(new THREE.BoxGeometry(5.4, 1.5, 5.4)), trimMat);
-  towerPlinth.position.set(0, 0.75, 0);
-  tower.add(towerPlinth);
-
-  const shaft = new THREE.Mesh(track(new THREE.BoxGeometry(4.4, 16.5, 4.4)), shaftMat);
-  shaft.position.set(0, 8.25, 0);
-  shaft.castShadow = true;
-  tower.add(shaft);
-
-  const midCollar = new THREE.Mesh(track(new THREE.BoxGeometry(5.1, 0.55, 5.1)), trimMat);
-  midCollar.position.set(0, 15.8, 0);
-  tower.add(midCollar);
-
-  const ribGeo = track(new THREE.BoxGeometry(0.6, 17.0, 0.6));
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const rib = new THREE.Mesh(ribGeo, trimMat);
-      rib.position.set(sx * 2.15, 8.5, sz * 2.15);
-      tower.add(rib);
-    }
-  }
-
-  // Iconic square dark-faced clock housing
-  const clockBox = new THREE.Mesh(track(new THREE.BoxGeometry(5.8, 5.5, 5.8)), whiteMat);
-  clockBox.position.set(0, 18.8, 0);
-  clockBox.castShadow = true;
-  tower.add(clockBox);
-
-  const faceGeo = track(new THREE.PlaneGeometry(4.6, 4.6));
-  const frontFace = new THREE.Mesh(faceGeo, clockMat);
-  frontFace.position.set(0, 18.8, 2.94);
-  tower.add(frontFace);
-
-  const leftFace = new THREE.Mesh(faceGeo, clockMat);
-  leftFace.rotation.y = -Math.PI / 2;
-  leftFace.position.set(-2.94, 18.8, 0);
-  tower.add(leftFace);
-
-  const rightFace = new THREE.Mesh(faceGeo, clockMat);
-  rightFace.rotation.y = Math.PI / 2;
-  rightFace.position.set(2.94, 18.8, 0);
-  tower.add(rightFace);
-
-  const lantern = new THREE.Mesh(track(new THREE.BoxGeometry(2.7, 2.0, 2.7)), whiteMat);
-  lantern.position.set(0, 22.6, 0);
-  tower.add(lantern);
-
-  const spire = new THREE.Mesh(track(new THREE.CylinderGeometry(0.08, 0.14, 3.6, 8)), trimMat);
-  spire.position.set(0, 25.4, 0);
-  tower.add(spire);
-
-  return tower;
-}
-
-/**
- * Builds Stage 2 End Landmark: Nhà Hát Lớn Hà Nội (Hanoi Opera House)
- * with textured Neo-Classical arched facade, pediment, and stepped slate Mansard roof + dormers.
- */
 function buildOperaHouseLandmark(
-  operaFacadeTex: THREE.CanvasTexture,
-  colonialTex: THREE.CanvasTexture,
+  operaFacadeTex: THREE.Texture,
+  colonialTex: THREE.Texture,
+  flagTex: THREE.Texture,
   track: <T extends { dispose: () => void }>(res: T) => T
 ): THREE.Group {
   const opera = new THREE.Group();
   opera.name = 'Landmark_NhaHatLon';
 
-  const facadeMat = track(
-    new THREE.MeshStandardMaterial({ map: operaFacadeTex, roughness: 0.72 })
-  );
-  const wingMat = track(
-    new THREE.MeshStandardMaterial({ map: colonialTex, roughness: 0.78 })
-  );
+  const facadeMat = track(new THREE.MeshStandardMaterial({ map: operaFacadeTex, roughness: 0.72 }));
+  const wingMat = track(new THREE.MeshStandardMaterial({ map: colonialTex, roughness: 0.78 }));
   const slateMat = track(
     new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.operaSlateRoof, roughness: 0.62 })
   );
@@ -590,7 +648,6 @@ function buildOperaHouseLandmark(
     new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.clockTowerWhite, roughness: 0.68 })
   );
 
-  // Raised stone plinth & grand entry steps
   const plinth = new THREE.Mesh(track(new THREE.BoxGeometry(38, 1.6, 18)), whiteMat);
   plinth.position.set(0, 0.8, 0);
   plinth.receiveShadow = true;
@@ -605,7 +662,6 @@ function buildOperaHouseLandmark(
     opera.add(step);
   }
 
-  // Main Neo-Classical Arched Facade + Side Pavilions
   const mainBody = new THREE.Mesh(track(new THREE.BoxGeometry(25, 11.4, 14)), facadeMat);
   mainBody.position.set(0, 7.3, 0);
   mainBody.castShadow = true;
@@ -617,10 +673,7 @@ function buildOperaHouseLandmark(
     wing.castShadow = true;
     opera.add(wing);
 
-    const wingRoof = new THREE.Mesh(
-      track(new THREE.CylinderGeometry(3.4, 4.7, 2.4, 4)),
-      slateMat
-    );
+    const wingRoof = new THREE.Mesh(track(new THREE.CylinderGeometry(3.4, 4.7, 2.4, 4)), slateMat);
     wingRoof.rotation.y = Math.PI / 4;
     wingRoof.scale.set(1.12, 1, 1.85);
     wingRoof.position.set(side * 16.0, 13.0, 0.4);
@@ -631,7 +684,6 @@ function buildOperaHouseLandmark(
     opera.add(wingCap);
   }
 
-  // Classical Double Columns supporting Portico
   const colGeo = track(new THREE.CylinderGeometry(0.32, 0.38, 6.6, 10));
   for (let i = -3; i <= 3; i++) {
     const col = new THREE.Mesh(colGeo, whiteMat);
@@ -639,25 +691,22 @@ function buildOperaHouseLandmark(
     opera.add(col);
   }
 
-  // Ornate White Cornice & Balustrade
   const cornice = new THREE.Mesh(track(new THREE.BoxGeometry(26.4, 1.15, 15.2)), whiteMat);
   cornice.position.set(0, 13.2, 0);
   opera.add(cornice);
 
-  // Classical Triangular Pediment centered above entrance
   const pedimentShape = new THREE.Shape();
   pedimentShape.moveTo(-6.2, 0);
   pedimentShape.lineTo(6.2, 0);
   pedimentShape.lineTo(0, 2.8);
   pedimentShape.closePath();
-  const pedimentGeo = track(
-    new THREE.ExtrudeGeometry(pedimentShape, { depth: 1.4, bevelEnabled: false })
+  const pediment = new THREE.Mesh(
+    track(new THREE.ExtrudeGeometry(pedimentShape, { depth: 1.4, bevelEnabled: false })),
+    whiteMat
   );
-  const pediment = new THREE.Mesh(pedimentGeo, whiteMat);
   pediment.position.set(0, 13.7, 6.4);
   opera.add(pediment);
 
-  // Tapered trapezoidal French Mansard Slate Roof (frustum tiers + white crest + sloped dormer windows)
   const lowerMansard = new THREE.Mesh(
     track(new THREE.CylinderGeometry(11.4, 14.2, 3.2, 4)),
     slateMat
@@ -684,7 +733,6 @@ function buildOperaHouseLandmark(
   crestBar.position.set(0, 20.2, 0);
   opera.add(crestBar);
 
-  // White arched dormer windows seated flush against the sloped front Mansard face
   const dormerGeo = track(new THREE.BoxGeometry(1.35, 1.75, 0.95));
   for (let i = -3; i <= 3; i++) {
     if (i === 0) continue;
@@ -694,12 +742,10 @@ function buildOperaHouseLandmark(
     opera.add(dormer);
   }
 
-  // Central Flagpole with Vietnamese Flag
   const pole = new THREE.Mesh(track(new THREE.CylinderGeometry(0.08, 0.1, 5.2, 8)), whiteMat);
   pole.position.set(0, 18.2, 6.6);
   opera.add(pole);
 
-  const flagTex = track(createFlagTexture());
   const flag = new THREE.Mesh(
     track(new THREE.PlaneGeometry(3.3, 2.15)),
     track(new THREE.MeshBasicMaterial({ map: flagTex, side: THREE.DoubleSide }))
@@ -707,62 +753,450 @@ function buildOperaHouseLandmark(
   flag.position.set(1.65, 19.7, 6.6);
   opera.add(flag);
 
-  // Multi-tiered Flower Roundabout Plaza in front
-  const plazaCurb = new THREE.Mesh(track(new THREE.CylinderGeometry(6.2, 6.6, 0.55, 18)), whiteMat);
-  plazaCurb.position.set(0, 0.28, 16.5);
-  opera.add(plazaCurb);
-
-  const plazaGreenery = new THREE.Mesh(
-    track(new THREE.CylinderGeometry(5.5, 5.7, 0.68, 18)),
-    track(new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.bougainvilleaLeaf, roughness: 0.85 }))
-  );
-  plazaGreenery.position.set(0, 0.42, 16.5);
-  opera.add(plazaGreenery);
-
-  const plazaFlowers = new THREE.Mesh(
-    track(new THREE.CylinderGeometry(3.8, 4.1, 0.9, 16)),
-    track(new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.bougainvilleaPink, roughness: 0.78 }))
-  );
-  plazaFlowers.position.set(0, 0.62, 16.5);
-  opera.add(plazaFlowers);
-
   return opera;
 }
 
-function createInstancedBatch(
+/**
+ * Stylized procedural fallback hero landmarks for all 9 Ver 2.0 iconic destinations
+ * (to be swapped seamlessly with user-supplied GLBs in Phase 2.0C).
+ */
+function buildDestinationLandmark(
+  dest: DestinationKey,
+  deps: {
+    colonialTex0: THREE.Texture;
+    colonialTex1: THREE.Texture;
+    roofTex: THREE.Texture;
+    shaftTex: THREE.Texture;
+    stoneTex: THREE.Texture;
+    operaFacadeTex: THREE.Texture;
+    flagTex: THREE.Texture;
+  },
+  track: <T extends { dispose: () => void }>(res: T) => T
+): THREE.Group {
+  if (dest === 'nha_hat_lon') {
+    const opera = buildOperaHouseLandmark(
+      deps.operaFacadeTex,
+      deps.colonialTex1,
+      deps.flagTex,
+      track
+    );
+    opera.scale.setScalar(1.12);
+    return opera;
+  }
+
+  const g = new THREE.Group();
+  g.name = `DestinationHero_${dest}`;
+
+  const whiteMat = track(
+    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.clockTowerWhite, roughness: 0.65 })
+  );
+  const stoneMat = track(new THREE.MeshStandardMaterial({ map: deps.shaftTex, roughness: 0.72 }));
+  const brickMat = track(
+    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.terracottaRoof, roughness: 0.78 })
+  );
+  const goldMat = track(
+    new THREE.MeshStandardMaterial({
+      color: HANOI_PALETTE.flagStarYellow,
+      roughness: 0.35,
+      metalness: 0.38
+    })
+  );
+  const glassMat = track(
+    new THREE.MeshStandardMaterial({ color: 0x3b6982, roughness: 0.2, metalness: 0.55 })
+  );
+  const grassMat = track(
+    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.bougainvilleaLeaf, roughness: 0.9 })
+  );
+  const flagMat = track(
+    new THREE.MeshBasicMaterial({ map: deps.flagTex, side: THREE.DoubleSide })
+  );
+
+  if (dest === 'my_dinh') {
+    // Sân vận động Quốc gia Mỹ Đình: wide white bowl + sweeping arched roof canopy + floodlight towers
+    const bowl = new THREE.Mesh(track(new THREE.CylinderGeometry(24, 21, 9.5, 24, 1, true)), whiteMat);
+    bowl.position.set(0, 4.75, 0);
+    g.add(bowl);
+
+    const roofArch = new THREE.Mesh(
+      track(new THREE.TorusGeometry(21, 3.2, 10, 28, Math.PI)),
+      whiteMat
+    );
+    roofArch.scale.set(1.15, 0.55, 1.0);
+    roofArch.position.set(0, 10.5, 2);
+    g.add(roofArch);
+
+    const pitch = new THREE.Mesh(track(new THREE.CylinderGeometry(19, 19, 0.4, 24)), grassMat);
+    pitch.position.set(0, 0.2, 0);
+    g.add(pitch);
+
+    const lightMat = track(new THREE.MeshBasicMaterial({ color: 0xfff8d8 }));
+    for (const sx of [-18, 18]) {
+      const mast = new THREE.Mesh(track(new THREE.CylinderGeometry(0.45, 0.65, 24, 8)), whiteMat);
+      mast.position.set(sx, 12, 6);
+      g.add(mast);
+      const bank = new THREE.Mesh(track(new THREE.BoxGeometry(5.5, 2.2, 0.8)), lightMat);
+      bank.position.set(sx, 23.2, 6.4);
+      g.add(bank);
+    }
+    return g;
+  }
+
+  if (dest === 'quan_su') {
+    // Bảo tàng Lịch sử Quân sự: modern stepped white exhibition hall + tall Victory Tower
+    const hall = new THREE.Mesh(track(new THREE.BoxGeometry(36, 9.5, 16)), whiteMat);
+    hall.position.set(0, 4.75, -4);
+    hall.castShadow = true;
+    g.add(hall);
+
+    const glassBand = new THREE.Mesh(track(new THREE.BoxGeometry(30, 3.8, 16.3)), glassMat);
+    glassBand.position.set(0, 5.2, -4);
+    g.add(glassBand);
+
+    const tower = new THREE.Mesh(track(new THREE.CylinderGeometry(1.5, 2.6, 26, 4)), whiteMat);
+    tower.rotation.y = Math.PI / 4;
+    tower.position.set(0, 13, 6);
+    tower.castShadow = true;
+    g.add(tower);
+
+    const star = new THREE.Mesh(track(new THREE.OctahedronGeometry(1.6, 0)), goldMat);
+    star.position.set(0, 27.2, 6);
+    g.add(star);
+    return g;
+  }
+
+  if (dest === 'vinuni') {
+    // Đại học VinUni: gothic-white arched main pavilion + central clock/bell spire + front lawn
+    const lawn = new THREE.Mesh(track(new THREE.BoxGeometry(40, 0.4, 14)), grassMat);
+    lawn.position.set(0, 0.2, 8);
+    g.add(lawn);
+
+    const body = new THREE.Mesh(track(new THREE.BoxGeometry(34, 11.5, 13)), whiteMat);
+    body.position.set(0, 5.75, -2);
+    body.castShadow = true;
+    g.add(body);
+
+    const roof = new THREE.Mesh(track(new THREE.BoxGeometry(35.2, 1.4, 13.8)), brickMat);
+    roof.position.set(0, 12.2, -2);
+    g.add(roof);
+
+    for (let i = -3; i <= 3; i++) {
+      const col = new THREE.Mesh(track(new THREE.CylinderGeometry(0.4, 0.45, 9.5, 8)), whiteMat);
+      col.position.set(i * 4.2, 4.75, 4.8);
+      g.add(col);
+    }
+
+    const spireBase = new THREE.Mesh(track(new THREE.BoxGeometry(6.5, 17, 6.5)), whiteMat);
+    spireBase.position.set(0, 8.5, -1);
+    g.add(spireBase);
+
+    const spireTop = new THREE.Mesh(track(new THREE.ConeGeometry(3.8, 8.5, 4)), glassMat);
+    spireTop.rotation.y = Math.PI / 4;
+    spireTop.position.set(0, 21.2, -1);
+    g.add(spireTop);
+    return g;
+  }
+
+  if (dest === 'lang_bac') {
+    // Lăng Chủ tịch Hồ Chí Minh: solemn stepped granite colonnade + Ba Đình lawn
+    const lawn = new THREE.Mesh(track(new THREE.BoxGeometry(42, 0.35, 16)), grassMat);
+    lawn.position.set(0, 0.18, 9);
+    g.add(lawn);
+
+    const graniteMat = track(
+      new THREE.MeshStandardMaterial({ color: 0x6f6c66, roughness: 0.78 })
+    );
+    const darkStoneMat = track(
+      new THREE.MeshStandardMaterial({ color: 0x3b3834, roughness: 0.85 })
+    );
+
+    const base = new THREE.Mesh(track(new THREE.BoxGeometry(34, 3.2, 18)), graniteMat);
+    base.position.set(0, 1.6, -2);
+    g.add(base);
+
+    const innerHall = new THREE.Mesh(track(new THREE.BoxGeometry(24, 9.5, 12)), darkStoneMat);
+    innerHall.position.set(0, 7.8, -2);
+    g.add(innerHall);
+
+    const colGeo = track(new THREE.BoxGeometry(1.3, 9.6, 1.3));
+    for (let i = -5; i <= 5; i++) {
+      const col = new THREE.Mesh(colGeo, graniteMat);
+      col.position.set(i * 2.7, 7.9, 5.2);
+      g.add(col);
+    }
+
+    const roof1 = new THREE.Mesh(track(new THREE.BoxGeometry(31, 2.2, 17)), graniteMat);
+    roof1.position.set(0, 13.6, -2);
+    g.add(roof1);
+
+    const roof2 = new THREE.Mesh(track(new THREE.BoxGeometry(25, 1.8, 13.5)), graniteMat);
+    roof2.position.set(0, 15.6, -2);
+    g.add(roof2);
+
+    const crest = new THREE.Mesh(track(new THREE.BoxGeometry(14, 0.9, 0.4)), brickMat);
+    crest.position.set(0, 13.8, 6.7);
+    g.add(crest);
+    return g;
+  }
+
+  if (dest === 'cot_co') {
+    // Cột Cờ Hà Nội: 3-tier brick bastion + octagonal tower + flying Vietnamese flag
+    const bastionMat = track(
+      new THREE.MeshStandardMaterial({ color: 0xa56946, roughness: 0.85 })
+    );
+    const tiers: Array<[number, number, number]> = [
+      [22, 3.4, 1.7],
+      [16.5, 3.2, 5.0],
+      [11.5, 3.0, 8.1]
+    ];
+    for (const [w, h, y] of tiers) {
+      const t = new THREE.Mesh(track(new THREE.BoxGeometry(w, h, w * 0.72)), bastionMat);
+      t.position.set(0, y, 0);
+      t.castShadow = true;
+      g.add(t);
+    }
+
+    const shaft = new THREE.Mesh(
+      track(new THREE.CylinderGeometry(2.3, 2.9, 13.5, 8)),
+      bastionMat
+    );
+    shaft.position.set(0, 16.2, 0);
+    shaft.castShadow = true;
+    g.add(shaft);
+
+    const crown = new THREE.Mesh(track(new THREE.CylinderGeometry(2.7, 2.7, 1.6, 8)), whiteMat);
+    crown.position.set(0, 23.4, 0);
+    g.add(crown);
+
+    const pole = new THREE.Mesh(track(new THREE.CylinderGeometry(0.12, 0.16, 7.5, 8)), whiteMat);
+    pole.position.set(0, 27.6, 0);
+    g.add(pole);
+
+    const flag = new THREE.Mesh(track(new THREE.PlaneGeometry(5.6, 3.6)), flagMat);
+    flag.position.set(2.8, 29.4, 0);
+    g.add(flag);
+    return g;
+  }
+
+  if (dest === 'nha_tho_lon') {
+    // Nhà Thờ Lớn Hà Nội: weathered gothic stone facade + twin bell towers + rose window
+    const cathedralMat = track(
+      new THREE.MeshStandardMaterial({ map: deps.stoneTex, color: 0x999286, roughness: 0.9 })
+    );
+    const body = new THREE.Mesh(track(new THREE.BoxGeometry(18, 14, 18)), cathedralMat);
+    body.position.set(0, 7, -2);
+    body.castShadow = true;
+    g.add(body);
+
+    for (const side of [-1, 1] as const) {
+      const belfry = new THREE.Mesh(track(new THREE.BoxGeometry(4.6, 23, 5.0)), cathedralMat);
+      belfry.position.set(side * 6.8, 11.5, 5.2);
+      belfry.castShadow = true;
+      g.add(belfry);
+
+      const spire = new THREE.Mesh(track(new THREE.ConeGeometry(2.6, 6.2, 4)), cathedralMat);
+      spire.rotation.y = Math.PI / 4;
+      spire.position.set(side * 6.8, 26.0, 5.2);
+      g.add(spire);
+    }
+
+    const rose = new THREE.Mesh(track(new THREE.CircleGeometry(2.4, 18)), goldMat);
+    rose.position.set(0, 10.6, 7.15);
+    g.add(rose);
+
+    const clockTex = track(createClockFaceTexture());
+    const clock = new THREE.Mesh(
+      track(new THREE.CircleGeometry(1.4, 16)),
+      track(new THREE.MeshBasicMaterial({ map: clockTex }))
+    );
+    clock.position.set(0, 14.5, 7.15);
+    g.add(clock);
+    return g;
+  }
+
+  if (dest === 'ho_hoan_kiem') {
+    // Hồ Hoàn Kiếm: jade-green lake + curved red Thê Húc bridge + Tháp Rùa island pavilion
+    const lakeMat = track(
+      new THREE.MeshStandardMaterial({ color: 0x1e6b5c, roughness: 0.22, metalness: 0.25 })
+    );
+    const lake = new THREE.Mesh(track(new THREE.CylinderGeometry(28, 28, 0.3, 28)), lakeMat);
+    lake.position.set(0, 0.15, -4);
+    g.add(lake);
+
+    const island = new THREE.Mesh(track(new THREE.CylinderGeometry(6.4, 7.2, 0.9, 16)), grassMat);
+    island.position.set(0, 0.55, -8);
+    g.add(island);
+
+    const tower1 = new THREE.Mesh(track(new THREE.BoxGeometry(4.8, 3.6, 4.8)), whiteMat);
+    tower1.position.set(0, 2.7, -8);
+    g.add(tower1);
+
+    const tower2 = new THREE.Mesh(track(new THREE.BoxGeometry(3.6, 2.8, 3.6)), whiteMat);
+    tower2.position.set(0, 5.9, -8);
+    g.add(tower2);
+
+    const roof = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 2.2, 4)), brickMat);
+    roof.rotation.y = Math.PI / 4;
+    roof.position.set(0, 8.4, -8);
+    g.add(roof);
+
+    // Curved red Cầu Thê Húc leading toward the side shore
+    const redBridgeMat = track(
+      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.flagRed, roughness: 0.55 })
+    );
+    const bridge = new THREE.Mesh(track(new THREE.BoxGeometry(14, 0.55, 2.6)), redBridgeMat);
+    bridge.position.set(11, 1.4, 4);
+    bridge.rotation.y = 0.28;
+    g.add(bridge);
+    return g;
+  }
+
+  // 'ga_ha_noi': Ga Hà Nội French-colonial station facade fallback
+  const stationWallMat = track(
+    new THREE.MeshStandardMaterial({ color: 0xd9b56c, roughness: 0.72 })
+  );
+  const mainHall = new THREE.Mesh(track(new THREE.BoxGeometry(44, 11.5, 14)), stationWallMat);
+  mainHall.position.set(0, 5.75, -2);
+  mainHall.castShadow = true;
+  g.add(mainHall);
+
+  const centralPavilion = new THREE.Mesh(
+    track(new THREE.BoxGeometry(15, 15.5, 16)),
+    stationWallMat
+  );
+  centralPavilion.position.set(0, 7.75, -1);
+  centralPavilion.castShadow = true;
+  g.add(centralPavilion);
+
+  const roofCap = new THREE.Mesh(track(new THREE.BoxGeometry(46, 1.6, 15)), brickMat);
+  roofCap.position.set(0, 12.2, -2);
+  g.add(roofCap);
+
+  const domeRoof = new THREE.Mesh(track(new THREE.ConeGeometry(8.5, 4.2, 4)), brickMat);
+  domeRoof.rotation.y = Math.PI / 4;
+  domeRoof.position.set(0, 17.6, -1);
+  g.add(domeRoof);
+
+  const clockTex = track(createClockFaceTexture());
+  const stationClock = new THREE.Mesh(
+    track(new THREE.CircleGeometry(1.75, 16)),
+    track(new THREE.MeshBasicMaterial({ map: clockTex }))
+  );
+  stationClock.position.set(0, 13.4, 7.1);
+  g.add(stationClock);
+
+  const canopy = new THREE.Mesh(track(new THREE.BoxGeometry(18, 0.45, 4.5)), stoneMat);
+  canopy.position.set(0, 4.4, 8.8);
+  g.add(canopy);
+  return g;
+}
+
+interface SceneryChunkData {
+  trunk: THREE.Matrix4[];
+  branch: THREE.Matrix4[];
+  limeBase: THREE.Matrix4[];
+  canopy: THREE.Matrix4[];
+  canopyColor: THREE.Color[];
+  pole: THREE.Matrix4[];
+  lampHead: THREE.Matrix4[];
+  flags: AnimatedFlagRecord[];
+  // Theme-specific
+  house: [THREE.Matrix4[], THREE.Matrix4[], THREE.Matrix4[]];
+  roof: THREE.Matrix4[];
+  waterTank: THREE.Matrix4[];
+  awning: THREE.Matrix4[];
+  balcony: THREE.Matrix4[];
+  signs: THREE.Matrix4[][];
+  stool: THREE.Matrix4[];
+  pot: THREE.Matrix4[];
+  potFlower: THREE.Matrix4[];
+  wires: number[];
+  villa: [THREE.Matrix4[], THREE.Matrix4[]];
+  villaRoof: THREE.Matrix4[];
+  banner: THREE.Matrix4[];
+  sunbeam: THREE.Matrix4[];
+  shrub: THREE.Matrix4[];
+  blossom: THREE.Matrix4[];
+  blossomColor: THREE.Color[];
+  pier: THREE.Matrix4[];
+  pierCap: THREE.Matrix4[];
+  midRise: [THREE.Matrix4[], THREE.Matrix4[]];
+  tower: [THREE.Matrix4[], THREE.Matrix4[], THREE.Matrix4[]];
+  towerCrown: THREE.Matrix4[];
+}
+
+function createEmptyChunkData(): SceneryChunkData {
+  return {
+    trunk: [],
+    branch: [],
+    limeBase: [],
+    canopy: [],
+    canopyColor: [],
+    pole: [],
+    lampHead: [],
+    flags: [],
+    house: [[], [], []],
+    roof: [],
+    waterTank: [],
+    awning: [],
+    balcony: [],
+    signs: Array.from({ length: 8 }, () => []),
+    stool: [],
+    pot: [],
+    potFlower: [],
+    wires: [],
+    villa: [[], []],
+    villaRoof: [],
+    banner: [],
+    sunbeam: [],
+    shrub: [],
+    blossom: [],
+    blossomColor: [],
+    pier: [],
+    pierCap: [],
+    midRise: [[], []],
+    tower: [[], [], []],
+    towerCrown: []
+  };
+}
+
+function createStreamingInstancedMesh(
   geometry: THREE.BufferGeometry,
   material: THREE.Material,
-  matrices: THREE.Matrix4[],
-  colors: THREE.Color[] | null,
+  maxCount: number,
+  hasColor: boolean,
   castShadow: boolean,
   receiveShadow: boolean,
   track: <T extends { dispose: () => void }>(res: T) => T
-): THREE.InstancedMesh | null {
-  if (matrices.length === 0) return null;
+): THREE.InstancedMesh {
   track(geometry);
   track(material);
-  const mesh = new THREE.InstancedMesh(geometry, material, matrices.length);
+  const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, maxCount));
+  mesh.count = 0;
   mesh.castShadow = castShadow;
   mesh.receiveShadow = receiveShadow;
-  for (let i = 0; i < matrices.length; i++) {
-    mesh.setMatrixAt(i, matrices[i]);
-    if (colors && colors[i]) {
-      mesh.setColorAt(i, colors[i]);
+  mesh.frustumCulled = false;
+  if (hasColor) {
+    // Initialize instanceColor buffer upfront
+    const c = new THREE.Color(0xffffff);
+    for (let i = 0; i < Math.max(1, maxCount); i++) {
+      mesh.setColorAt(i, c);
     }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   return mesh;
 }
 
 /**
- * Builds rich textured Hanoi architecture, multi-cluster organic trees, street life,
- * and 360-degree horizon backdrops across all 3 stages while preserving >= 55 FPS.
+ * Streaming Hanoi scenery builder supporting 2 km, 5 km, and 10 km stages
+ * within bounded InstancedMesh budgets (drawCalls <= 120, FPS >= 55).
+ * Includes full 4-lane green ancient tree canopy tunnel (FR-13) and 9 hero destination landmarks.
  */
-export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
+export function buildHanoiLandmarks(stageId: StageId): LandmarksBuildResult {
   const stage = getStageSpec(stageId);
   const roadWidth = stage.roadWidth;
   const roadHalfW = roadWidth * 0.5;
+  const routeFeatures = getStageRouteFeatures(stageId);
+
   const group = new THREE.Group();
   group.name = `HanoiLandmarks_Stage${stageId}`;
 
@@ -771,8 +1205,6 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
     disposables.push(res);
     return res;
   };
-  const rand = createPrng(stageId * 9173 + 42);
-  const dummy = new THREE.Object3D();
 
   // Shared procedural textures
   const roofTex = track(createTerracottaRoofTexture());
@@ -781,35 +1213,19 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
   const colonialTex0 = track(createColonialFacadeTexture(0));
   const colonialTex1 = track(createColonialFacadeTexture(1));
   const shaftTex = track(createClockTowerShaftTexture());
-
-  const animatedFlags: AnimatedFlagInstance[] = [];
-  const flagData: Array<{
-    x: number;
-    y: number;
-    z: number;
-    yaw: number;
-    sx: number;
-    sy: number;
-    sz: number;
-    phase: number;
-  }> = [];
-
-  // Shared multi-part organic tree & lamppost batches
-  const trunkMatrices: THREE.Matrix4[] = [];
-  const branchMatrices: THREE.Matrix4[] = [];
-  const limeBaseMatrices: THREE.Matrix4[] = [];
-  const canopyMatrices: THREE.Matrix4[] = [];
-  const canopyColors: THREE.Color[] = [];
-  const poleMatrices: THREE.Matrix4[] = [];
-  const lampHeadMatrices: THREE.Matrix4[] = [];
+  const stoneTex = track(createOQuanChuongStoneTexture());
+  const operaFacadeTex = track(createOperaFacadeTexture());
+  const flagTex = track(createFlagTexture());
 
   const greenCol = new THREE.Color(HANOI_PALETTE.foliageGreen);
-  const deepGreenCol = new THREE.Color(0x28562b);
+  const deepGreenCol = new THREE.Color(0x265928);
   const sunlitCol = new THREE.Color(HANOI_PALETTE.foliageSunlit);
   const autumnCol = new THREE.Color(HANOI_PALETTE.foliageAutumn);
+  const pinkCol = new THREE.Color(HANOI_PALETTE.bougainvilleaPink);
+  const magentaCol = new THREE.Color(HANOI_PALETTE.bougainvilleaMagenta);
 
-  const pushMatrix = (
-    arr: THREE.Matrix4[],
+  const dummy = new THREE.Object3D();
+  const makeMat = (
     x: number,
     y: number,
     z: number,
@@ -819,77 +1235,78 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
     sx = 1,
     sy = 1,
     sz = 1
-  ) => {
+  ): THREE.Matrix4 => {
     dummy.position.set(x, y, z);
     dummy.rotation.set(rx, ry, rz);
     dummy.scale.set(sx, sy, sz);
     dummy.updateMatrix();
-    arr.push(dummy.matrix.clone());
+    return dummy.matrix.clone();
   };
 
-  /**
-   * Builds a multi-branch, multi-puff organic Hanoi street tree (never a single sphere).
-   */
-  const addOrganicTree = (
+  const isNearIntersection = (d: number, pad = 12.5): boolean => {
+    for (const ix of routeFeatures.intersections) {
+      if (Math.abs(d - ix.distance) <= ix.halfLength + pad) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const pushTreeIntoChunk = (
+    chunk: SceneryChunkData,
+    rand: () => number,
     tx: number,
     z: number,
     hScale: number,
     withLimeBase: boolean,
     leanInwardDir: number,
-    isAutumnStyle = false
-  ) => {
+    isAutumnStyle: boolean,
+    withCanopyArch = false,
+    cxCenter = 0
+  ): void => {
     const trunkH = 5.2 * hScale;
-    pushMatrix(
-      trunkMatrices,
-      tx,
-      trunkH * 0.5,
-      z,
-      0,
-      rand() * Math.PI,
-      leanInwardDir * 0.08,
-      0.95,
-      hScale,
-      0.95
+    chunk.trunk.push(
+      makeMat(tx, trunkH * 0.5, z, 0, rand() * Math.PI, leanInwardDir * 0.08, 0.95, hScale, 0.95)
     );
     if (withLimeBase) {
-      pushMatrix(limeBaseMatrices, tx, 0.72, z, 0, 0, 0, 1.0, 1.0, 1.0);
+      chunk.limeBase.push(makeMat(tx, 0.72, z, 0, 0, 0, 1, 1, 1));
     }
 
-    // Two diverging upper branches supporting asymmetrical foliage clusters
-    pushMatrix(
-      branchMatrices,
-      tx + leanInwardDir * 0.65,
-      trunkH + 0.45,
-      z - 0.35,
-      0.22,
-      0,
-      -leanInwardDir * 0.52,
-      1,
-      hScale * 0.85,
-      1
+    chunk.branch.push(
+      makeMat(
+        tx + leanInwardDir * 0.65,
+        trunkH + 0.45,
+        z - 0.35,
+        0.22,
+        0,
+        -leanInwardDir * 0.52,
+        1,
+        hScale * 0.85,
+        1
+      )
     );
-    pushMatrix(
-      branchMatrices,
-      tx - leanInwardDir * 0.45,
-      trunkH + 0.35,
-      z + 0.45,
-      -0.25,
-      0,
-      leanInwardDir * 0.48,
-      1,
-      hScale * 0.8,
-      1
+    chunk.branch.push(
+      makeMat(
+        tx - leanInwardDir * 0.45,
+        trunkH + 0.35,
+        z + 0.45,
+        -0.25,
+        0,
+        leanInwardDir * 0.48,
+        1,
+        hScale * 0.8,
+        1
+      )
     );
 
     const pickColor = () => {
       if (isAutumnStyle) return rand() > 0.38 ? autumnCol : sunlitCol;
       const r = rand();
-      return r > 0.65 ? sunlitCol : r > 0.25 ? greenCol : deepGreenCol;
+      return r > 0.62 ? sunlitCol : r > 0.25 ? greenCol : deepGreenCol;
     };
 
     const crownY = trunkH + 1.65 * hScale;
     const crownX = tx + leanInwardDir * 0.95;
-    // 4 overlapping irregular leafy puffs per tree
     const puffs: Array<[number, number, number, number, number, number]> = [
       [0, 0.3, 0, 2.7, 1.65, 2.7],
       [leanInwardDir * 1.35, -0.1, -0.95, 2.25, 1.35, 2.15],
@@ -897,279 +1314,577 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
       [leanInwardDir * 0.35, 1.05, 0.25, 1.95, 1.25, 1.95]
     ];
     for (const [ox, oy, oz, sx, sy, sz] of puffs) {
-      pushMatrix(
-        canopyMatrices,
-        crownX + ox,
-        crownY + oy,
-        z + oz,
-        rand() * 0.4,
-        rand() * Math.PI * 2,
-        rand() * 0.4,
-        sx * hScale,
-        sy * hScale,
-        sz * hScale
+      chunk.canopy.push(
+        makeMat(
+          crownX + ox,
+          crownY + oy,
+          z + oz,
+          rand() * 0.4,
+          rand() * Math.PI * 2,
+          rand() * 0.4,
+          sx * hScale,
+          sy * hScale,
+          sz * hScale
+        )
       );
-      canopyColors.push(pickColor());
+      chunk.canopyColor.push(pickColor());
+    }
+
+    // Lush overarching green canopy tunnel across the 4-lane boulevard (FR-13)
+    if (withCanopyArch) {
+      chunk.branch.push(
+        makeMat(
+          tx + leanInwardDir * 2.2,
+          trunkH + 1.55,
+          z,
+          0,
+          0,
+          -leanInwardDir * 0.98,
+          0.95,
+          hScale * 1.25,
+          0.95
+        )
+      );
+      const archX = THREE.MathUtils.lerp(tx, cxCenter, 0.62);
+      const archPuffs: Array<[number, number, number, number, number, number]> = [
+        [archX, 9.2 + rand() * 0.8, z, 3.6, 1.75, 3.8],
+        [cxCenter + leanInwardDir * 1.1, 9.8 + rand() * 0.8, z - 2.2, 3.8, 1.7, 3.6],
+        [cxCenter - leanInwardDir * 0.8, 10.1 + rand() * 0.7, z + 2.2, 3.5, 1.6, 3.5]
+      ];
+      for (const [ax, ay, az, sx, sy, sz] of archPuffs) {
+        chunk.canopy.push(
+          makeMat(ax, ay, az, rand() * 0.25, rand() * Math.PI * 2, rand() * 0.25, sx, sy, sz)
+        );
+        chunk.canopyColor.push(pickColor());
+      }
     }
   };
 
   // ============================================================================
-  // START (A) ARCH FOR ALL STAGES
+  // DETERMINISTIC PER-CHUNK SCENERY GENERATOR (CACHED WINDOW)
   // ============================================================================
-  const startArchColors: Record<1 | 2 | 3, { bg: string; border: string; pillar: number }> = {
-    1: { bg: '#5b3a22', border: '#e3a837', pillar: HANOI_PALETTE.oldQuarterYellow },
-    2: { bg: '#0f6b70', border: '#f6eedc', pillar: HANOI_PALETTE.shutterTealDark },
-    3: { bg: '#155b94', border: '#ffcd00', pillar: HANOI_PALETTE.overpassConcrete }
-  };
-  const sa = startArchColors[stageId];
-  const startArch = createGateArch(
-    roadWidth,
-    stage.fromLabel.toUpperCase(),
-    `XUẤT PHÁT · ${stage.shortName.toUpperCase()} · ${stage.laneCount} LÀN (${stage.length}M)`,
-    sa.bg,
-    sa.border,
-    sa.pillar,
-    track
-  );
-  startArch.position.set(
-    getRoadCenterX(stageId, 16),
-    getRoadElevationY(stageId, 16),
-    distanceToWorldZ(16)
-  );
-  startArch.rotation.y = getRoadTangentYaw(stageId, 16);
-  group.add(startArch);
+  const chunkCache = new Map<number, SceneryChunkData>();
 
-  // ============================================================================
-  // STAGE 1: PHỐ CỔ (TEXTURED SHOPHOUSES, 3 SIGNBOARDS, STOOLS/POTS, Ô QUAN CHƯỞNG)
-  // ============================================================================
-  if (stageId === 1) {
-    const houseM: [THREE.Matrix4[], THREE.Matrix4[], THREE.Matrix4[]] = [[], [], []];
-    const roofM: THREE.Matrix4[] = [];
-    const waterTankM: THREE.Matrix4[] = [];
-    const awningM: THREE.Matrix4[] = [];
-    const balconyM: THREE.Matrix4[] = [];
-    const signM: THREE.Matrix4[][] = Array.from({ length: 8 }, () => []);
-    const stoolM: THREE.Matrix4[] = [];
-    const potM: THREE.Matrix4[] = [];
-    const potFlowerM: THREE.Matrix4[] = [];
-    const wirePoints: number[] = [];
+  const generateChunkData = (chunkIdx: number): SceneryChunkData => {
+    const cached = chunkCache.get(chunkIdx);
+    if (cached) return cached;
 
-    let houseSeq = 0;
-    for (let d = 18; d < stage.length - 15; d += 11.0) {
-      if (d > 632 && d < 668) continue;
+    const data = createEmptyChunkData();
+    const d0 = chunkIdx * SCENERY_CHUNK_LEN;
+    const d1 = d0 + SCENERY_CHUNK_LEN;
+    if (d1 <= 10 || d0 >= stage.length - 8) {
+      chunkCache.set(chunkIdx, data);
+      return data;
+    }
 
-      const cx = getRoadCenterX(1, d);
-      const z = distanceToWorldZ(d);
-      const yaw = getRoadTangentYaw(1, d);
+    const rand = createPrng(stageId * 9173 + chunkIdx * 7919 + 42);
 
-      for (const side of [-1, 1] as const) {
-        const frontage = 4.6 + rand() * 2.8;
-        const h = 7.4 + rand() * 8.2;
-        const depth = 8.0 + rand() * 2.2;
-        const setback = (rand() - 0.5) * 1.1;
-        const xOff = cx + side * (roadHalfW + 4.4 + depth * 0.5 + setback);
-        const faceOffset = -side * (depth * 0.5 + 0.06);
-        const variant = ((houseSeq * 2 + (side > 0 ? 1 : 0)) % 3) as 0 | 1 | 2;
+    if (stage.theme === 'old_quarter') {
+      const step = 11.0;
+      const firstIdx = Math.max(2, Math.ceil(d0 / step));
+      const lastIdx = Math.min(Math.floor((stage.length - 15) / step), Math.floor((d1 - 0.01) / step));
 
-        // Varied Old Quarter "nhà ống" shophouse
-        pushMatrix(houseM[variant], xOff, h * 0.5, z, 0, yaw, 0, depth, h, frontage);
+      for (let seq = firstIdx; seq <= lastIdx; seq++) {
+        const d = seq * step;
+        if (stageId === 8 && d > 632 && d < 668) continue;
+        if (isNearIntersection(d, 10.5)) continue;
 
-        // Slanted textured terracotta roof
-        pushMatrix(
-          roofM,
-          xOff,
-          h + 0.72,
-          z,
-          0,
-          yaw,
-          side * 0.08,
-          depth + 0.65,
-          1.45,
-          frontage + 0.45
-        );
+        const cx = getRoadCenterX(stageId, d);
+        const z = distanceToWorldZ(d);
+        const yaw = getRoadTangentYaw(stageId, d);
 
-        // Signature Hanoi stainless-steel rooftop water tanks on ~38% of buildings
-        if (rand() > 0.62) {
-          pushMatrix(
-            waterTankM,
-            xOff + side * 1.1,
-            h + 2.05,
-            z + (rand() - 0.5) * 1.2,
-            0,
-            0,
-            Math.PI / 2,
-            0.72,
-            1.65,
-            0.72
+        for (const side of [-1, 1] as const) {
+          const frontage = 4.6 + rand() * 2.8;
+          const h = 7.4 + rand() * 8.2;
+          const depth = 8.0 + rand() * 2.2;
+          const setback = (rand() - 0.5) * 1.1;
+          const xOff = cx + side * (roadHalfW + 4.4 + depth * 0.5 + setback);
+          const faceOffset = -side * (depth * 0.5 + 0.06);
+          const variant = ((seq * 2 + (side > 0 ? 1 : 0)) % 3) as 0 | 1 | 2;
+
+          data.house[variant].push(makeMat(xOff, h * 0.5, z, 0, yaw, 0, depth, h, frontage));
+          data.roof.push(
+            makeMat(xOff, h + 0.72, z, 0, yaw, side * 0.08, depth + 0.65, 1.45, frontage + 0.45)
           );
-        }
 
-        // Ground-floor corrugated teal awning
-        pushMatrix(
-          awningM,
-          xOff + faceOffset - side * 0.9,
-          3.15,
-          z,
-          0,
-          yaw,
-          side * 0.28,
-          2.0,
-          0.14,
-          frontage * 0.92
-        );
-
-        // Wrought-iron 2nd floor balcony deck
-        pushMatrix(
-          balconyM,
-          xOff + faceOffset - side * 0.45,
-          4.25,
-          z,
-          0,
-          yaw,
-          0,
-          0.9,
-          0.35,
-          frontage * 0.8
-        );
-
-        // 8 distinct Old Quarter shop signboards cycled so neighbors never duplicate
-        if (rand() > 0.14) {
-          const signIdx = (houseSeq * 3 + (side > 0 ? 4 : 0)) % 8;
-          pushMatrix(
-            signM[signIdx],
-            xOff + faceOffset - side * 0.96,
-            4.55,
-            z,
-            0,
-            yaw,
-            0,
-            0.12,
-            0.94,
-            Math.min(5.2, frontage * 0.72)
-          );
-        }
-
-        // Sidewalk street life: plastic trà đá stools & terracotta flower pots
-        const curbWalkX = cx + side * (roadHalfW + 2.55);
-        if (rand() > 0.35) {
-          pushMatrix(stoolM, curbWalkX, 0.34, z - 0.9, 0, 0, 0, 0.42, 0.34, 0.42);
-          pushMatrix(stoolM, curbWalkX - side * 0.55, 0.34, z - 0.5, 0, 0, 0, 0.42, 0.34, 0.42);
-        }
-        if (rand() > 0.4) {
-          pushMatrix(potM, curbWalkX + side * 0.55, 0.42, z + 1.4, 0, 0, 0, 0.5, 0.55, 0.5);
-          pushMatrix(potFlowerM, curbWalkX + side * 0.55, 0.85, z + 1.4, 0, 0, 0, 0.65, 0.55, 0.65);
-        }
-
-        // Utility pole & organic tree + flag
-        if (Math.floor(d / 11.0) % 2 === 0) {
-          const poleX = cx + side * (roadHalfW + 1.05);
-          pushMatrix(poleMatrices, poleX, 3.8, z, 0, 0, 0, 1, 1, 1);
-
-          if (rand() > 0.3) {
-            flagData.push({
-              x: poleX - side * 0.5,
-              y: 4.5,
-              z,
-              yaw: yaw + (side > 0 ? 0.3 : -0.3),
-              sx: 1.0,
-              sy: 0.7,
-              sz: 1,
-              phase: d * 0.17
-            });
+          if (rand() > 0.62) {
+            data.waterTank.push(
+              makeMat(xOff + side * 1.1, h + 2.05, z + (rand() - 0.5) * 1.2, 0, 0, Math.PI / 2, 0.72, 1.65, 0.72)
+            );
           }
-        } else if (rand() > 0.36) {
-          const tx = cx + side * (roadHalfW + 2.05);
-          addOrganicTree(tx, z, 0.88 + rand() * 0.22, true, -side, false);
+
+          data.awning.push(
+            makeMat(xOff + faceOffset - side * 0.9, 3.15, z, 0, yaw, side * 0.28, 2.0, 0.14, frontage * 0.92)
+          );
+          data.balcony.push(
+            makeMat(xOff + faceOffset - side * 0.45, 4.25, z, 0, yaw, 0, 0.9, 0.35, frontage * 0.8)
+          );
+
+          if (rand() > 0.14) {
+            const signIdx = (seq * 3 + (side > 0 ? 4 : 0)) % 8;
+            data.signs[signIdx].push(
+              makeMat(
+                xOff + faceOffset - side * 0.96,
+                4.55,
+                z,
+                0,
+                yaw,
+                0,
+                0.12,
+                0.94,
+                Math.min(5.2, frontage * 0.72)
+              )
+            );
+          }
+
+          const curbWalkX = cx + side * (roadHalfW + 2.55);
+          if (rand() > 0.35) {
+            data.stool.push(makeMat(curbWalkX, 0.34, z - 0.9, 0, 0, 0, 0.42, 0.34, 0.42));
+            data.stool.push(makeMat(curbWalkX - side * 0.55, 0.34, z - 0.5, 0, 0, 0, 0.42, 0.34, 0.42));
+          }
+          if (rand() > 0.4) {
+            data.pot.push(makeMat(curbWalkX + side * 0.55, 0.42, z + 1.4, 0, 0, 0, 0.5, 0.55, 0.5));
+            data.potFlower.push(
+              makeMat(curbWalkX + side * 0.55, 0.85, z + 1.4, 0, 0, 0, 0.65, 0.55, 0.65)
+            );
+          }
+
+          if (seq % 2 === 0) {
+            const poleX = cx + side * (roadHalfW + 1.05);
+            data.pole.push(makeMat(poleX, 3.8, z, 0, 0, 0, 1, 1, 1));
+            if (rand() > 0.3) {
+              data.flags.push({
+                x: poleX - side * 0.5,
+                y: 4.5,
+                z,
+                baseYaw: yaw + (side > 0 ? 0.3 : -0.3),
+                scaleX: 1.0,
+                scaleY: 0.7,
+                scaleZ: 1,
+                phase: d * 0.17
+              });
+            }
+          } else if (rand() > 0.36) {
+            const tx = cx + side * (roadHalfW + 2.05);
+            pushTreeIntoChunk(data, rand, tx, z, 0.88 + rand() * 0.22, true, -side, false);
+          }
+        }
+
+        if (d < stage.length - 58 && seq % 3 === 0) {
+          const lx = cx - (roadHalfW + 1.05);
+          const rx = cx + (roadHalfW + 1.05);
+          for (let wIdx = 0; wIdx < 2; wIdx++) {
+            const hStart = 7.6 + wIdx * 0.35;
+            const sag = 0.55 + wIdx * 0.25;
+            const zShift = z + wIdx * 0.6;
+            const segs = 6;
+            for (let s = 0; s < segs; s++) {
+              const t0 = s / segs;
+              const t1 = (s + 1) / segs;
+              data.wires.push(
+                THREE.MathUtils.lerp(lx, rx, t0),
+                hStart - Math.sin(t0 * Math.PI) * sag,
+                zShift,
+                THREE.MathUtils.lerp(lx, rx, t1),
+                hStart - Math.sin(t1 * Math.PI) * sag,
+                zShift
+              );
+            }
+          }
         }
       }
-      houseSeq += 1;
 
-      // Tangled overhead catenary power wires crossing above street (stop clearly before Clock Tower)
-      if (d < stage.length - 58 && Math.floor(d / 11.0) % 3 === 0) {
-        const lx = cx - (roadHalfW + 1.05);
-        const rx = cx + (roadHalfW + 1.05);
-        for (let wIdx = 0; wIdx < 2; wIdx++) {
-          const hStart = 7.6 + wIdx * 0.35;
-          const sag = 0.55 + wIdx * 0.25;
-          const zShift = z + wIdx * 0.6;
-          const segs = 6;
-          for (let s = 0; s < segs; s++) {
-            const t0 = s / segs;
-            const t1 = (s + 1) / segs;
-            wirePoints.push(
-              THREE.MathUtils.lerp(lx, rx, t0),
-              hStart - Math.sin(t0 * Math.PI) * sag,
-              zShift,
-              THREE.MathUtils.lerp(lx, rx, t1),
-              hStart - Math.sin(t1 * Math.PI) * sag,
-              zShift
+      // Seal flanks of Ô Quan Chưởng on Stage 8 (Hoàn Kiếm)
+      if (stageId === 8 && d0 <= 670 && d1 >= 630) {
+        for (const dFlank of [634, 645, 656, 667]) {
+          if (dFlank < d0 || dFlank >= d1) continue;
+          const cxF = getRoadCenterX(stageId, dFlank);
+          const zF = distanceToWorldZ(dFlank);
+          const yawF = getRoadTangentYaw(stageId, dFlank);
+          for (const side of [-1, 1] as const) {
+            for (const [ringDist, ringH, ringW] of [
+              [roadHalfW + 19.5, 9.8 + rand() * 3.2, 13.0],
+              [roadHalfW + 33.0, 11.5 + rand() * 3.8, 14.5]
+            ] as const) {
+              const v = Math.floor(rand() * 3) as 0 | 1 | 2;
+              const xf = cxF + side * ringDist;
+              data.house[v].push(makeMat(xf, ringH * 0.5, zF, 0, yawF, 0, ringW, ringH, 12.0));
+              data.roof.push(
+                makeMat(xf, ringH + 0.72, zF, 0, yawF, side * 0.06, ringW + 0.6, 1.45, 12.2)
+              );
+            }
+            pushTreeIntoChunk(data, rand, cxF + side * (roadHalfW + 12.8), zF, 1.08, true, -side, false);
+          }
+        }
+      }
+    } else if (stage.theme === 'tree_boulevard') {
+      const step = 8.5;
+      const firstIdx = Math.max(2, Math.ceil(d0 / step));
+      const lastIdx = Math.min(Math.floor((stage.length - 16) / step), Math.floor((d1 - 0.01) / step));
+
+      for (let seq = firstIdx; seq <= lastIdx; seq++) {
+        const d = seq * step;
+        const nearIx = isNearIntersection(d, 10.0);
+        const cx = getRoadCenterX(stageId, d);
+        const z = distanceToWorldZ(d);
+        const yaw = getRoadTangentYaw(stageId, d);
+
+        if (!nearIx) {
+          for (const side of [-1, 1] as const) {
+            const tx = cx + side * (roadHalfW + 1.9);
+            const hScale = 1.2 + rand() * 0.34;
+            // Full overarching green tree canopy tunnel across the 4-lane avenue (FR-13)
+            pushTreeIntoChunk(data, rand, tx, z, hScale, true, -side, false, true, cx);
+
+            if (seq % 2 === 0) {
+              const vx = cx + side * (roadHalfW + 12.4);
+              const vh = 8.6 + rand() * 3.4;
+              const vIdx = ((seq / 2) % 2 === 0 ? 0 : 1) as 0 | 1;
+              data.villa[vIdx].push(makeMat(vx, vh * 0.5, z, 0, yaw, 0, 10.5, vh, 13.5));
+              data.villaRoof.push(
+                makeMat(vx, vh + 0.85, z, 0, yaw, side * 0.08, 11.2, 1.7, 14.0)
+              );
+            }
+
+            if (seq % 3 === 0) {
+              const lx = cx + side * (roadHalfW + 0.95);
+              data.pole.push(makeMat(lx, 3.6, z, 0, 0, 0, 0.9, 1.0, 0.9));
+              data.lampHead.push(makeMat(lx - side * 0.35, 6.9, z, 0, 0, 0, 1, 1, 1));
+              data.banner.push(makeMat(lx - side * 0.65, 5.0, z, 0, yaw, 0, 1.1, 1.1, 1.1));
+              if (seq % 6 === 0) {
+                data.flags.push({
+                  x: lx - side * 0.55,
+                  y: 3.9,
+                  z: z + 0.3,
+                  baseYaw: yaw + (side > 0 ? 0.25 : -0.25),
+                  scaleX: 1.15,
+                  scaleY: 0.78,
+                  scaleZ: 1,
+                  phase: d * 0.13
+                });
+              }
+            }
+          }
+        }
+
+        if (seq % 4 === 0) {
+          data.sunbeam.push(makeMat(cx - 1.8, 5.4, z, 0.22, 0.15, -0.48, 4.4, 14.0, 1.0));
+        }
+      }
+    }
+
+    // Frame perpendicular +-X cross-streets at any IntersectionZone inside this chunk (FR-02 polish)
+    if (stage.theme === 'old_quarter' || stage.theme === 'tree_boulevard') {
+      for (const ix of routeFeatures.intersections) {
+        if (ix.distance < d0 || ix.distance >= d1) continue;
+        const cx = getRoadCenterX(stageId, ix.distance);
+        const cz = distanceToWorldZ(ix.distance);
+        const yaw = getRoadTangentYaw(stageId, ix.distance);
+        const cosY = Math.cos(yaw);
+        const sinY = Math.sin(yaw);
+
+        const toWorld = (lx: number, lz: number): [number, number] => [
+          cx + lx * cosY + lz * sinY,
+          cz - lx * sinY + lz * cosY
+        ];
+
+        for (const sideX of [-1, 1] as const) {
+          for (const sideZ of [-1, 1] as const) {
+            for (let k = 0; k < 4; k++) {
+              const lx = sideX * (roadHalfW + 10.5 + k * 12.0);
+              const depth = 9.0 + rand() * 2.5;
+              const frontage = 9.5 + rand() * 2.2;
+              const lz = sideZ * (11.6 + depth * 0.5);
+              const [wx, wz] = toWorld(lx, lz);
+              const rotY = yaw + Math.PI * 0.5;
+
+              if (stage.theme === 'old_quarter') {
+                const h = 8.2 + rand() * 6.5;
+                const v = (k + (sideX > 0 ? 1 : 0)) % 3 as 0 | 1 | 2;
+                data.house[v].push(makeMat(wx, h * 0.5, wz, 0, rotY, 0, depth, h, frontage));
+                data.roof.push(
+                  makeMat(wx, h + 0.72, wz, 0, rotY, sideZ * 0.06, depth + 0.5, 1.45, frontage + 0.4)
+                );
+              } else {
+                const h = 9.0 + rand() * 3.8;
+                const v = (k + (sideZ > 0 ? 1 : 0)) % 2 as 0 | 1;
+                data.villa[v].push(makeMat(wx, h * 0.5, wz, 0, rotY, 0, depth, h, frontage));
+                data.villaRoof.push(
+                  makeMat(wx, h + 0.85, wz, 0, rotY, sideZ * 0.06, depth + 0.6, 1.7, frontage + 0.4)
+                );
+              }
+            }
+
+            // Cross-street sidewalk trees framing the +/-X view
+            for (let t = 0; t < 3; t++) {
+              const txLocal = sideX * (roadHalfW + 8.5 + t * 16.0);
+              const tzLocal = sideZ * 9.3;
+              const [tx, tz] = toWorld(txLocal, tzLocal);
+              pushTreeIntoChunk(data, rand, tx, tz, 0.98 + rand() * 0.2, true, -sideZ, false);
+            }
+          }
+        }
+      }
+    }
+
+    if (stage.theme === 'overpass_avenue') {
+      // Chapter 1: overpass_avenue (Stages 1..3 — 6 lanes)
+      const step = 4.5;
+      const firstIdx = Math.max(3, Math.ceil(d0 / step));
+      const lastIdx = Math.min(Math.floor((stage.length - 12) / step), Math.floor((d1 - 0.01) / step));
+
+      for (let seq = firstIdx; seq <= lastIdx; seq++) {
+        const d = seq * step;
+        const cx = getRoadCenterX(stageId, d);
+        const z = distanceToWorldZ(d);
+        const yaw = getRoadTangentYaw(stageId, d);
+        const roadY = getRoadElevationY(stageId, d);
+
+        for (const side of [-1, 1] as const) {
+          const mx = cx + side * (roadHalfW + 1.85);
+          data.shrub.push(makeMat(mx, 0.52, z, 0, rand() * 3, 0, 1.38, 0.86, 1.38));
+          data.blossom.push(
+            makeMat(
+              mx + (rand() - 0.5) * 0.45,
+              0.86 + rand() * 0.25,
+              z + (rand() - 0.5) * 0.45,
+              0,
+              rand() * 3,
+              0,
+              1.2,
+              0.78,
+              1.2
+            )
+          );
+          data.blossomColor.push(rand() > 0.45 ? pinkCol : magentaCol);
+
+          if (roadY > 0.2) {
+            const px = cx + side * (roadHalfW + 0.54);
+            data.shrub.push(makeMat(px, roadY + 0.7, z, 0, rand() * 3, 0, 0.85, 0.56, 1.35));
+            for (const dz of [-1.05, 1.05]) {
+              data.blossom.push(
+                makeMat(
+                  px + (rand() - 0.5) * 0.22,
+                  roadY + 0.94 + rand() * 0.18,
+                  z + dz + (rand() - 0.5) * 0.35,
+                  0,
+                  rand() * 3,
+                  0,
+                  0.84 + rand() * 0.22,
+                  0.55 + rand() * 0.16,
+                  1.12 + rand() * 0.25
+                )
+              );
+              data.blossomColor.push(rand() > 0.42 ? pinkCol : magentaCol);
+            }
+          }
+        }
+
+        if (seq % 4 === 0) {
+          for (const side of [-1, 1] as const) {
+            pushTreeIntoChunk(
+              data,
+              rand,
+              cx + side * (roadHalfW + 11.4),
+              z,
+              0.92 + rand() * 0.25,
+              false,
+              -side,
+              true
             );
           }
         }
-      }
-    }
 
-    // Seal both flanks of Ô Quan Chưởng (d = 632..668) with stepped Old Quarter blocks & trees
-    for (const dFlank of [634, 645, 656, 667]) {
-      const cxF = getRoadCenterX(1, dFlank);
-      const zF = distanceToWorldZ(dFlank);
-      const yawF = getRoadTangentYaw(1, dFlank);
-      for (const side of [-1, 1] as const) {
-        for (const [ringDist, ringH, ringW] of [
-          [roadHalfW + 19.5, 9.8 + rand() * 3.2, 13.0],
-          [roadHalfW + 33.0, 11.5 + rand() * 3.8, 14.5]
-        ] as const) {
-          const v = Math.floor(rand() * 3) as 0 | 1 | 2;
-          const xf = cxF + side * ringDist;
-          pushMatrix(houseM[v], xf, ringH * 0.5, zF, 0, yawF, 0, ringW, ringH, 12.0);
-          pushMatrix(roofM, xf, ringH + 0.72, zF, 0, yawF, side * 0.06, ringW + 0.6, 1.45, 12.2);
+        if (seq % 5 === 0) {
+          for (const side of [-1, 1] as const) {
+            const px = cx + side * (roadHalfW + 0.72);
+            data.pole.push(makeMat(px, roadY + 3.4, z, 0, 0, 0, 0.78, 0.95, 0.78));
+            data.lampHead.push(makeMat(px - side * 0.5, roadY + 6.9, z, 0, 0, 0, 1.2, 0.8, 1.2));
+          }
+        }
+
+        if (seq % 3 === 0) {
+          for (const side of [-1, 1] as const) {
+            const bx = cx + side * (roadHalfW + 25.0);
+            const bh = 11.5 + rand() * 7.0;
+            const mVariant = ((seq + (side > 0 ? 1 : 0)) % 2) as 0 | 1;
+            data.midRise[mVariant].push(makeMat(bx, bh * 0.5, z, 0, yaw, 0, 12.5, bh, 14.2));
+            data.towerCrown.push(makeMat(bx, bh + 0.65, z, 0, yaw, 0, 11.4, 1.3, 13.0));
+          }
+        }
+
+        if (seq % 6 === 0) {
+          for (const side of [-1, 1] as const) {
+            const bx = cx + side * (roadHalfW + 39 + rand() * 14);
+            const bh = 24 + rand() * 24;
+            const bw = 13 + rand() * 6;
+            const variant = Math.floor(rand() * 3) as 0 | 1 | 2;
+            data.tower[variant].push(makeMat(bx, bh * 0.5, z, 0, yaw, 0, bw, bh, 16));
+            const crownH = 3.2 + rand() * 3.4;
+            data.towerCrown.push(
+              makeMat(bx, bh + crownH * 0.5, z, 0, yaw, 0, bw * 0.66, crownH, 10.5)
+            );
+          }
+        }
+
+        if (seq % 8 === 0) {
+          for (const side of [-1, 1] as const) {
+            const bx = cx + side * (roadHalfW + 64 + rand() * 14);
+            const bh = 28 + rand() * 24;
+            const variant = Math.floor(rand() * 3) as 0 | 1 | 2;
+            data.tower[variant].push(makeMat(bx, bh * 0.5, z, 0, 0, 0, 19, bh, 22));
+          }
+        }
+
+        // Overpass concrete piers on Stage 1-3 (d = 840..1246m)
+        if (stageId === 3 && seq % 6 === 0 && d >= 840 && d <= 1246) {
+          const yDeck = getRoadElevationY(stageId, d);
+          if (yDeck >= 2.2) {
+            const pierH = yDeck - 0.85;
+            for (const pxOff of [-6.8, 0, 6.8]) {
+              data.pier.push(makeMat(cx + pxOff, pierH * 0.5, z, 0, 0, 0, 1, pierH, 1));
+            }
+            data.pierCap.push(makeMat(cx, pierH - 0.35, z, 0, 0, 0, roadWidth + 0.8, 0.85, 1.9));
+          }
         }
       }
     }
 
-    // Extra corner Old Quarter blocks flanking Finish Plaza approach (Stage 1)
-    for (const dEnd of [stage.length - 6, stage.length + 10, stage.length + 26]) {
-      const cxE = getRoadCenterX(1, dEnd);
-      const zE = distanceToWorldZ(dEnd);
-      for (const side of [-1, 1] as const) {
-        const xf = cxE + side * (roadHalfW + 19.5);
-        const hf = 11.5 + rand() * 3.0;
-        const v = Math.floor(rand() * 3) as 0 | 1 | 2;
-        pushMatrix(houseM[v], xf, hf * 0.5, zE, 0, 0, 0, 16, hf, 14);
-        pushMatrix(roofM, xf, hf + 0.72, zE, 0, 0, side * 0.06, 16.5, 1.45, 14.4);
-      }
+    chunkCache.set(chunkIdx, data);
+    if (chunkCache.size > 18) {
+      const firstKey = chunkCache.keys().next().value;
+      if (firstKey !== undefined) chunkCache.delete(firstKey);
     }
+    return data;
+  };
 
-    const addInst = (
-      geo: THREE.BufferGeometry,
-      mat: THREE.Material,
-      m: THREE.Matrix4[],
-      c: THREE.Color[] | null,
-      cast = true
-    ) => {
-      const im = createInstancedBatch(geo, mat, m, c, cast, true, track);
-      if (im) group.add(im);
-    };
+  // ============================================================================
+  // BOUNDED STREAMING INSTANCED MESHES (MAX ~480M WINDOW)
+  // ============================================================================
+  const trunkMesh = createStreamingInstancedMesh(
+    new THREE.CylinderGeometry(0.24, 0.42, 5.2, 8),
+    new THREE.MeshStandardMaterial({ map: barkTex, roughness: 0.92 }),
+    260,
+    false,
+    true,
+    true,
+    track
+  );
+  const branchMesh = createStreamingInstancedMesh(
+    new THREE.CylinderGeometry(0.11, 0.2, 2.5, 6),
+    new THREE.MeshStandardMaterial({ map: barkTex, roughness: 0.92 }),
+    680,
+    false,
+    true,
+    true,
+    track
+  );
+  const limeMesh = createStreamingInstancedMesh(
+    new THREE.CylinderGeometry(0.4, 0.46, 1.45, 8),
+    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.treeLimeBase, roughness: 0.9 }),
+    260,
+    false,
+    false,
+    true,
+    track
+  );
+  const canopyMesh = createStreamingInstancedMesh(
+    new THREE.IcosahedronGeometry(1.0, 1),
+    new THREE.MeshStandardMaterial({ map: foliageTex, color: 0xffffff, roughness: 0.85 }),
+    1800,
+    true,
+    true,
+    true,
+    track
+  );
+  const poleMesh = createStreamingInstancedMesh(
+    new THREE.CylinderGeometry(0.08, 0.11, 7.2, 8),
+    new THREE.MeshStandardMaterial({
+      color: HANOI_PALETTE.shutterTealDark,
+      roughness: 0.55,
+      metalness: 0.35
+    }),
+    160,
+    false,
+    false,
+    false,
+    track
+  );
+  const lampMesh = createStreamingInstancedMesh(
+    new THREE.SphereGeometry(0.24, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0xfff0c2 }),
+    160,
+    false,
+    false,
+    false,
+    track
+  );
 
-    ([0, 1, 2] as const).forEach((v) => {
+  const flagInst = createStreamingInstancedMesh(
+    new THREE.PlaneGeometry(1.4, 0.95),
+    new THREE.MeshBasicMaterial({ map: flagTex, side: THREE.DoubleSide }),
+    120,
+    false,
+    false,
+    false,
+    track
+  );
+
+  group.add(trunkMesh, branchMesh, limeMesh, canopyMesh, poleMesh, lampMesh, flagInst);
+
+  // Theme-specific streaming batches
+  let houseMeshes: [THREE.InstancedMesh, THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
+  let roofMesh: THREE.InstancedMesh | null = null;
+  let waterTankMesh: THREE.InstancedMesh | null = null;
+  let awningMesh: THREE.InstancedMesh | null = null;
+  let balconyMesh: THREE.InstancedMesh | null = null;
+  let signMeshes: THREE.InstancedMesh[] = [];
+  let stoolMesh: THREE.InstancedMesh | null = null;
+  let potMesh: THREE.InstancedMesh | null = null;
+  let potFlowerMesh: THREE.InstancedMesh | null = null;
+  let wireGeo: THREE.BufferGeometry | null = null;
+  let wireLines: THREE.LineSegments | null = null;
+  const MAX_WIRE_VERTS = 1200;
+
+  let villaMeshes: [THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
+  let villaRoofMesh: THREE.InstancedMesh | null = null;
+  let bannerMesh: THREE.InstancedMesh | null = null;
+  let sunbeamMesh: THREE.InstancedMesh | null = null;
+
+  let shrubMesh: THREE.InstancedMesh | null = null;
+  let blossomMesh: THREE.InstancedMesh | null = null;
+  let pierMesh: THREE.InstancedMesh | null = null;
+  let pierCapMesh: THREE.InstancedMesh | null = null;
+  let midRiseMeshes: [THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
+  let towerMeshes: [THREE.InstancedMesh, THREE.InstancedMesh, THREE.InstancedMesh] | null = null;
+  let towerCrownMesh: THREE.InstancedMesh | null = null;
+
+  if (stage.theme === 'old_quarter') {
+    houseMeshes = ([0, 1, 2] as const).map((v) => {
       const fTex = track(createOldQuarterFacadeTexture(v));
-      addInst(
+      const m = createStreamingInstancedMesh(
         new THREE.BoxGeometry(1, 1, 1),
         new THREE.MeshStandardMaterial({ map: fTex, roughness: 0.82 }),
-        houseM[v],
-        null,
-        true
+        104,
+        false,
+        true,
+        true,
+        track
       );
-    });
+      group.add(m);
+      return m;
+    }) as [THREE.InstancedMesh, THREE.InstancedMesh, THREE.InstancedMesh];
 
-    addInst(
+    roofMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.78 }),
-      roofM,
-      null,
-      true
+      170,
+      false,
+      true,
+      true,
+      track
     );
-    addInst(
+    waterTankMesh = createStreamingInstancedMesh(
       new THREE.CylinderGeometry(0.5, 0.5, 1, 10),
       new THREE.MeshStandardMaterial({
         color: 0xd8dee4,
@@ -1177,24 +1892,35 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
         roughness: 0.22,
         envMapIntensity: 1.5
       }),
-      waterTankM,
-      null,
-      true
+      60,
+      false,
+      true,
+      true,
+      track
     );
-    addInst(
+    awningMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.shutterTealDark, roughness: 0.68 }),
-      awningM,
-      null,
-      true
+      120,
+      false,
+      true,
+      true,
+      track
     );
-    addInst(
+    balconyMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.ironBalcony, roughness: 0.5, metalness: 0.45 }),
-      balconyM,
-      null,
-      false
+      new THREE.MeshStandardMaterial({
+        color: HANOI_PALETTE.ironBalcony,
+        roughness: 0.5,
+        metalness: 0.45
+      }),
+      120,
+      false,
+      false,
+      true,
+      track
     );
+    group.add(roofMesh, waterTankMesh, awningMesh, balconyMesh);
 
     const signSpecs: Array<[string, string, string, string]> = [
       ['PHỞ GIA TRUYỀN · BÚN BÒ', 'HƯƠNG VỊ HÀ THÀNH · MỞ CỬA', '#7b241c', '#f6d167'],
@@ -1206,9 +1932,9 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
       ['CẮT TÓC NAM · CỔ ĐIỂN', 'GỘI ĐẦU · RÁY TAI · THƯ GIÃN', '#22382e', '#e3a837'],
       ["L'ÉTAGE CAFÉ · MỸ NGHỆ", 'PHỐ CỔ HÀ NỘI · GÓC NHÌN CỔ', '#5b3a22', '#e3a837']
     ];
-    signSpecs.forEach(([title, sub, bg, border], idx) => {
+    signMeshes = signSpecs.map(([title, sub, bg, border]) => {
       const sTex = track(createBannerTexture(title, sub, bg, border, '#f6eedc', 1024, 224));
-      addInst(
+      const sm = createStreamingInstancedMesh(
         new THREE.BoxGeometry(1, 1, 1),
         new THREE.MeshStandardMaterial({
           map: sTex,
@@ -1217,234 +1943,83 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
           emissiveIntensity: 0.65,
           roughness: 0.55
         }),
-        signM[idx],
-        null,
-        false
+        32,
+        false,
+        false,
+        true,
+        track
       );
+      group.add(sm);
+      return sm;
     });
 
-    addInst(
+    stoolMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: 0x1b6ca8, roughness: 0.55 }),
-      stoolM,
-      null,
-      false
-    );
-    addInst(
-      new THREE.CylinderGeometry(0.45, 0.35, 1, 8),
-      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.terracottaRoof, roughness: 0.85 }),
-      potM,
-      null,
-      false
-    );
-    addInst(
-      new THREE.DodecahedronGeometry(0.65, 0),
-      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.foliageGreen, roughness: 0.82 }),
-      potFlowerM,
-      null,
-      false
-    );
-
-    if (wirePoints.length > 0) {
-      const wireGeo = track(new THREE.BufferGeometry());
-      wireGeo.setAttribute('position', new THREE.Float32BufferAttribute(wirePoints, 3));
-      const wireMat = track(
-        new THREE.LineBasicMaterial({ color: 0x1e1d1c, transparent: true, opacity: 0.82 })
-      );
-      group.add(new THREE.LineSegments(wireGeo, wireMat));
-    }
-
-    // Ô Quan Chưởng Arched Gate at ~650m
-    const stoneTex = track(createOQuanChuongStoneTexture());
-    const oqc = buildOQuanChuongGate(roadWidth, stoneTex, roofTex, track);
-    oqc.position.set(getRoadCenterX(1, 650), 0, distanceToWorldZ(650));
-    oqc.rotation.y = getRoadTangentYaw(1, 650);
-    group.add(oqc);
-
-    for (const dTree of [638, 646, 656, 666]) {
-      const cxTree = getRoadCenterX(1, dTree);
-      const zTree = distanceToWorldZ(dTree);
-      for (const side of [-1, 1] as const) {
-        addOrganicTree(cxTree + side * (roadHalfW + 12.8), zTree, 1.08, true, -side, false);
-        addOrganicTree(cxTree + side * (roadHalfW + 24.5), zTree - 2.0, 1.22, false, -side, false);
-      }
-    }
-
-    // Finish Arch (B) + Tháp Đồng Hồ Bờ Hồ & Bưu Điện Hà Nội at 1450m
-    const finishArch = createGateArch(
-      roadWidth,
-      'THÁP ĐỒNG HỒ BỜ HỒ (B)',
-      'HOÀN THÀNH BÀI 1 · HỒ GƯƠM HÀ NỘI',
-      '#0f6b70',
-      '#e3a837',
-      HANOI_PALETTE.oldQuarterCream,
-      track
-    );
-    finishArch.position.set(
-      getRoadCenterX(1, stage.length),
-      0,
-      distanceToWorldZ(stage.length)
-    );
-    finishArch.rotation.y = getRoadTangentYaw(1, stage.length);
-    group.add(finishArch);
-
-    const clockTower = buildClockTowerLandmark(colonialTex0, roofTex, shaftTex, track);
-    clockTower.position.set(
-      getRoadCenterX(1, stage.length + 28) + 4.5,
-      0,
-      distanceToWorldZ(stage.length + 28)
-    );
-    clockTower.rotation.y = -0.18;
-    group.add(clockTower);
-
-    // Lush Hoàn Kiếm Lakefront park trees & backdrop city buildings sealing horizon
-    const bgM: THREE.Matrix4[] = [];
-    const cxEnd1 = getRoadCenterX(1, stage.length);
-    for (let i = -5; i <= 5; i++) {
-      const distEnd = stage.length + 42 + Math.abs(i) * 5;
-      const bx = cxEnd1 + i * 20;
-      const bz = distanceToWorldZ(distEnd);
-      const bh = 14 + (Math.abs(i) % 3) * 4;
-      pushMatrix(bgM, bx, bh * 0.5, bz, 0, 0, 0, 22, bh, 14);
-      if (Math.abs(i) >= 2) {
-        addOrganicTree(
-          cxEnd1 + i * 11.5,
-          distanceToWorldZ(stage.length + 14 + (Math.abs(i) % 2) * 8),
-          1.15,
-          true,
-          i > 0 ? -1 : 1,
-          false
-        );
-      }
-    }
-    const bgIm = createInstancedBatch(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ map: colonialTex1, roughness: 0.85 }),
-      bgM,
-      null,
+      140,
+      false,
       false,
       true,
       track
     );
-    if (bgIm) group.add(bgIm);
-  }
-
-  // ============================================================================
-  // STAGE 2: PHỐ CÂY XANH & QUẢNG TRƯỜNG NHÀ HÁT LỚN
-  // ============================================================================
-  if (stageId === 2) {
-    const villaM: [THREE.Matrix4[], THREE.Matrix4[]] = [[], []];
-    const villaRoofM: THREE.Matrix4[] = [];
-    const bannerM: THREE.Matrix4[] = [];
-    const sunbeamM: THREE.Matrix4[] = [];
-
-    for (let d = 22; d < stage.length - 18; d += 12) {
-      const cx = getRoadCenterX(2, d);
-      const z = distanceToWorldZ(d);
-      const yaw = getRoadTangentYaw(2, d);
-
-      for (const side of [-1, 1] as const) {
-        // Multi-cluster ancient Hanoi street canopies arching over the avenue
-        const tx = cx + side * (roadHalfW + 2.2);
-        const hScale = 1.08 + rand() * 0.38;
-        addOrganicTree(tx, z, hScale, true, -side, false);
-
-        // Textured French-colonial streetfront villas with terracotta pitched roofs
-        if (Math.floor(d / 12) % 2 === 0) {
-          const vx = cx + side * (roadHalfW + 12.2);
-          const vh = 8.6 + rand() * 3.4;
-          const vIdx = (Math.floor(d / 12) / 2) % 2 === 0 ? 0 : 1;
-          pushMatrix(villaM[vIdx], vx, vh * 0.5, z, 0, yaw, 0, 10.5, vh, 14.5);
-          pushMatrix(
-            villaRoofM,
-            vx,
-            vh + 0.85,
-            z,
-            0,
-            yaw,
-            side * 0.08,
-            11.2,
-            1.7,
-            15.0
-          );
-        }
-
-        // Vintage Khue Van Cac lamppost & upright medallion + red flag
-        if (Math.floor(d / 12) % 2 === 0) {
-          const lx = cx + side * (roadHalfW + 1.0);
-          pushMatrix(poleMatrices, lx, 3.6, z, 0, 0, 0, 0.9, 1.0, 0.9);
-          pushMatrix(lampHeadMatrices, lx - side * 0.35, 6.9, z, 0, 0, 0, 1, 1, 1);
-          pushMatrix(bannerM, lx - side * 0.65, 5.0, z, 0, yaw, 0, 1.1, 1.1, 1.1);
-          if (Math.floor(d / 24) % 2 === 0) {
-            flagData.push({
-              x: lx - side * 0.55,
-              y: 3.9,
-              z: z + 0.3,
-              yaw: yaw + (side > 0 ? 0.25 : -0.25),
-              sx: 1.15,
-              sy: 0.78,
-              sz: 1,
-              phase: d * 0.13
-            });
-          }
-        }
-      }
-
-      if (Math.floor(d / 12) % 4 === 0) {
-        pushMatrix(sunbeamM, cx - 2.0, 5.5, z, 0.22, 0.15, -0.48, 4.6, 14.5, 1.0);
-      }
-    }
-
-    // Flanking Colonial corner villas sealing Opera House plaza far left/right edges
-    const cxEnd2 = getRoadCenterX(2, stage.length);
-    for (const dSide of [stage.length - 4, stage.length + 14, stage.length + 32]) {
-      const zS = distanceToWorldZ(dSide);
-      for (const side of [-1, 1] as const) {
-        for (const distX of [roadHalfW + 17.5, roadHalfW + 31.5]) {
-          const vx = cxEnd2 + side * distX;
-          const vh = 10.5 + rand() * 3.0;
-          const vIdx = rand() > 0.5 ? 0 : 1;
-          pushMatrix(villaM[vIdx], vx, vh * 0.5, zS, 0, 0, 0, 13.0, vh, 15.0);
-          pushMatrix(villaRoofM, vx, vh + 0.85, zS, 0, 0, side * 0.06, 13.5, 1.7, 15.4);
-        }
-      }
-    }
-
-    const vIm0 = createInstancedBatch(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ map: colonialTex0, roughness: 0.8 }),
-      villaM[0],
-      null,
-      true,
+    potMesh = createStreamingInstancedMesh(
+      new THREE.CylinderGeometry(0.45, 0.35, 1, 8),
+      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.terracottaRoof, roughness: 0.85 }),
+      100,
+      false,
+      false,
       true,
       track
     );
-    if (vIm0) group.add(vIm0);
-
-    const vIm1 = createInstancedBatch(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ map: colonialTex1, roughness: 0.8 }),
-      villaM[1],
-      null,
-      true,
+    potFlowerMesh = createStreamingInstancedMesh(
+      new THREE.DodecahedronGeometry(0.65, 0),
+      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.foliageGreen, roughness: 0.82 }),
+      100,
+      false,
+      false,
       true,
       track
     );
-    if (vIm1) group.add(vIm1);
+    group.add(stoolMesh, potMesh, potFlowerMesh);
 
-    const vRoofIm = createInstancedBatch(
+    wireGeo = track(new THREE.BufferGeometry());
+    wireGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(new Float32Array(MAX_WIRE_VERTS * 3), 3)
+    );
+    wireGeo.setDrawRange(0, 0);
+    const wireMat = track(
+      new THREE.LineBasicMaterial({ color: 0x1e1d1c, transparent: true, opacity: 0.82 })
+    );
+    wireLines = new THREE.LineSegments(wireGeo, wireMat);
+    wireLines.frustumCulled = false;
+    group.add(wireLines);
+  } else if (stage.theme === 'tree_boulevard') {
+    villaMeshes = ([0, 1] as const).map((v) => {
+      const m = createStreamingInstancedMesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshStandardMaterial({ map: v === 0 ? colonialTex0 : colonialTex1, roughness: 0.8 }),
+        104,
+        false,
+        true,
+        true,
+        track
+      );
+      group.add(m);
+      return m;
+    }) as [THREE.InstancedMesh, THREE.InstancedMesh];
+
+    villaRoofMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.78 }),
-      villaRoofM,
-      null,
+      150,
+      false,
       true,
       true,
       track
     );
-    if (vRoofIm) group.add(vRoofIm);
-
     const kvcTex = track(createKhueVanCacBannerTexture());
-    const bannerMesh = createInstancedBatch(
+    bannerMesh = createStreamingInstancedMesh(
       new THREE.CircleGeometry(0.62, 18),
       new THREE.MeshBasicMaterial({
         map: kvcTex,
@@ -1452,16 +2027,14 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
         alphaTest: 0.2,
         side: THREE.DoubleSide
       }),
-      bannerM,
-      null,
+      80,
+      false,
       false,
       false,
       track
     );
-    if (bannerMesh) group.add(bannerMesh);
-
     const sunbeamTex = track(createSoftSunbeamTexture());
-    const sunbeamMesh = createInstancedBatch(
+    sunbeamMesh = createStreamingInstancedMesh(
       new THREE.PlaneGeometry(1, 1),
       new THREE.MeshBasicMaterial({
         map: sunbeamTex,
@@ -1472,255 +2045,28 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
         blending: THREE.AdditiveBlending,
         side: THREE.DoubleSide
       }),
-      sunbeamM,
-      null,
+      40,
+      false,
       false,
       false,
       track
     );
-    if (sunbeamMesh) group.add(sunbeamMesh);
-
-    // Finish Arch (B) + Nhà Hát Lớn Hà Nội at 1700m
-    const finishArch = createGateArch(
-      roadWidth,
-      'QUẢNG TRƯỜNG NHÀ HÁT LỚN (B)',
-      'HOÀN THÀNH BÀI 2 · KIẾN TRÚC HÀ NỘI',
-      '#323b45',
-      '#e8a838',
-      HANOI_PALETTE.oldQuarterCream,
-      track
-    );
-    finishArch.position.set(
-      getRoadCenterX(2, stage.length),
-      0,
-      distanceToWorldZ(stage.length)
-    );
-    finishArch.rotation.y = getRoadTangentYaw(2, stage.length);
-    group.add(finishArch);
-
-    // Dense plaza trees & textured cityscape flanking and behind Nhà Hát Lớn
-    const operaBackdropM: THREE.Matrix4[] = [];
-    for (let i = -5; i <= 5; i++) {
-      if (Math.abs(i) >= 1) {
-        addOrganicTree(
-          cxEnd2 + i * 11.2,
-          distanceToWorldZ(stage.length + 18 + (Math.abs(i) % 3) * 6),
-          1.2,
-          true,
-          i > 0 ? -1 : 1,
-          false
-        );
-      }
-      if (Math.abs(i) >= 1) {
-        pushMatrix(
-          operaBackdropM,
-          cxEnd2 + i * 21,
-          8.5,
-          distanceToWorldZ(stage.length + 54 + Math.abs(i) * 4),
-          0,
-          0,
-          0,
-          22,
-          17,
-          14
-        );
-      }
-    }
-    const opBgIm = createInstancedBatch(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ map: colonialTex0, roughness: 0.85 }),
-      operaBackdropM,
-      null,
-      false,
-      true,
-      track
-    );
-    if (opBgIm) group.add(opBgIm);
-
-    const operaTex = track(createOperaFacadeTexture());
-    const opera = buildOperaHouseLandmark(operaTex, colonialTex1, track);
-    opera.scale.setScalar(1.12);
-    opera.position.set(
-      getRoadCenterX(2, stage.length + 40),
-      0,
-      distanceToWorldZ(stage.length + 40)
-    );
-    group.add(opera);
-  }
-
-  // ============================================================================
-  // STAGE 3: ĐẠI LỘ HOA GIẤY & CẦU VƯỢT (TEXTURED SKYLINE & LUSH TREES)
-  // ============================================================================
-  if (stageId === 3) {
-    const shrubM: THREE.Matrix4[] = [];
-    const blossomM: THREE.Matrix4[] = [];
-    const blossomC: THREE.Color[] = [];
-    const pierM: THREE.Matrix4[] = [];
-    const pierCapM: THREE.Matrix4[] = [];
-    const midRiseM: [THREE.Matrix4[], THREE.Matrix4[]] = [[], []];
-    const towerM: [THREE.Matrix4[], THREE.Matrix4[], THREE.Matrix4[]] = [[], [], []];
-    const towerCrownM: THREE.Matrix4[] = [];
-
-    const pinkCol = new THREE.Color(HANOI_PALETTE.bougainvilleaPink);
-    const magentaCol = new THREE.Color(HANOI_PALETTE.bougainvilleaMagenta);
-
-    for (let d = 12; d < stage.length - 12; d += 4.5) {
-      const cx = getRoadCenterX(3, d);
-      const z = distanceToWorldZ(d);
-      const yaw = getRoadTangentYaw(3, d);
-      const roadY = getRoadElevationY(3, d);
-      const stepIdx = Math.floor(d / 4.5);
-
-      for (const side of [-1, 1] as const) {
-        const mx = cx + side * (roadHalfW + 1.85);
-        pushMatrix(shrubM, mx, 0.52, z, 0, rand() * 3, 0, 1.38, 0.86, 1.38);
-        pushMatrix(
-          blossomM,
-          mx + (rand() - 0.5) * 0.45,
-          0.86 + rand() * 0.25,
-          z + (rand() - 0.5) * 0.45,
-          0,
-          rand() * 3,
-          0,
-          1.2,
-          0.78,
-          1.2
-        );
-        blossomC.push(rand() > 0.45 ? pinkCol : magentaCol);
-
-        // Cascading lush bougainvillea planters along the wide 6-lane Overpass guardrails
-        if (roadY > 0.2) {
-          const px = cx + side * (roadHalfW + 0.54);
-          pushMatrix(shrubM, px, roadY + 0.7, z, 0, rand() * 3, 0, 0.85, 0.56, 1.35);
-          for (const dz of [-1.05, 1.05]) {
-            pushMatrix(
-              blossomM,
-              px + (rand() - 0.5) * 0.22,
-              roadY + 0.94 + rand() * 0.18,
-              z + dz + (rand() - 0.5) * 0.35,
-              0,
-              rand() * 3,
-              0,
-              0.84 + rand() * 0.22,
-              0.55 + rand() * 0.16,
-              1.12 + rand() * 0.25
-            );
-            blossomC.push(rand() > 0.42 ? pinkCol : magentaCol);
-          }
-        }
-      }
-
-      // Slender autumn-gold Bàng Lá Nhỏ trees set wide beside the 6-lane avenue
-      if (stepIdx % 4 === 0) {
-        for (const side of [-1, 1] as const) {
-          const tx = cx + side * (roadHalfW + 11.4);
-          addOrganicTree(tx, z, 0.92 + rand() * 0.25, false, -side, true);
-        }
-      }
-
-      // Tall highway streetlights along the wide avenue & overpass deck
-      if (stepIdx % 5 === 0) {
-        for (const side of [-1, 1] as const) {
-          const px = cx + side * (roadHalfW + 0.72);
-          pushMatrix(poleMatrices, px, roadY + 3.4, z, 0, 0, 0, 0.78, 0.95, 0.78);
-          pushMatrix(lampHeadMatrices, px - side * 0.5, roadY + 6.9, z, 0, 0, 0, 1.2, 0.8, 1.2);
-        }
-      }
-
-      // Wide-set mid-rise modern apartment/commercial buildings giving an airy New Urban Area vista
-      if (stepIdx % 3 === 0) {
-        for (const side of [-1, 1] as const) {
-          const bx = cx + side * (roadHalfW + 25.0);
-          const bh = 11.5 + rand() * 7.0;
-          const mVariant = (stepIdx + (side > 0 ? 1 : 0)) % 2 as 0 | 1;
-          pushMatrix(midRiseM[mVariant], bx, bh * 0.5, z, 0, yaw, 0, 12.5, bh, 14.2);
-          pushMatrix(towerCrownM, bx, bh + 0.65, z, 0, yaw, 0, 11.4, 1.3, 13.0);
-        }
-      }
-
-      // Varied modern Hanoi skyline towers set well back for an expansive 6-lane boulevard feel
-      if (stepIdx % 6 === 0) {
-        for (const side of [-1, 1] as const) {
-          const bx = cx + side * (roadHalfW + 39 + rand() * 14);
-          const bh = 24 + rand() * 24;
-          const bw = 13 + rand() * 6;
-          const variant = Math.floor(rand() * 3) as 0 | 1 | 2;
-          pushMatrix(towerM[variant], bx, bh * 0.5, z, 0, yaw, 0, bw, bh, 16);
-          const crownH = 3.2 + rand() * 3.4;
-          pushMatrix(towerCrownM, bx, bh + crownH * 0.5, z, 0, yaw, 0, bw * 0.66, crownH, 10.5);
-        }
-      }
-
-      // Distant outer skyline tier visible from the Overpass crest
-      if (stepIdx % 8 === 0) {
-        for (const side of [-1, 1] as const) {
-          const bx = cx + side * (roadHalfW + 64 + rand() * 14);
-          const bh = 28 + rand() * 24;
-          const variant = Math.floor(rand() * 3) as 0 | 1 | 2;
-          pushMatrix(towerM[variant], bx, bh * 0.5, z, 0, 0, 0, 19, bh, 22);
-        }
-      }
-    }
-
-    // Seal Stage 3 finish plaza wings & full 180-degree urban skyline horizon behind monument
-    const cxEnd3 = getRoadCenterX(3, stage.length);
-    for (const dEnd of [stage.length - 4, stage.length + 12, stage.length + 28, stage.length + 44]) {
-      const zE = distanceToWorldZ(dEnd);
-      for (const side of [-1, 1] as const) {
-        const xm = cxEnd3 + side * (roadHalfW + 19.5);
-        const hm = 14 + rand() * 5;
-        pushMatrix(midRiseM[side > 0 ? 1 : 0], xm, hm * 0.5, zE, 0, 0, 0, 15, hm, 17);
-        const xt = cxEnd3 + side * (roadHalfW + 35.5);
-        const ht = 28 + rand() * 14;
-        const vt = Math.floor(rand() * 3) as 0 | 1 | 2;
-        pushMatrix(towerM[vt], xt, ht * 0.5, zE, 0, 0, 0, 18, ht, 17);
-        pushMatrix(towerCrownM, xt, ht + 2.2, zE, 0, 0, 0, 12, 4.4, 11.5);
-      }
-    }
-    for (let i = -6; i <= 6; i++) {
-      const bx = cxEnd3 + i * 18;
-      const bz = distanceToWorldZ(stage.length + 60 + Math.abs(i) * 4);
-      const bh = 24 + ((i + 6) % 3) * 9;
-      const variant = ((i + 6) % 3) as 0 | 1 | 2;
-      pushMatrix(towerM[variant], bx, bh * 0.5, bz, 0, 0, 0, 22, bh, 16);
-      pushMatrix(towerCrownM, bx, bh + 2.2, bz, 0, 0, 0, 14, 4.4, 10.5);
-      if (Math.abs(i) >= 1) {
-        addOrganicTree(
-          cxEnd3 + i * 10.5,
-          distanceToWorldZ(stage.length + 20 + (Math.abs(i) % 3) * 6),
-          1.15,
-          false,
-          i > 0 ? -1 : 1,
-          true
-        );
-      }
-    }
-
-    // Wide 6-lane Overpass Concrete Support Piers (3 sturdy columns under 20.4m deck)
-    for (let d = 840; d <= 1246; d += 28) {
-      const cx = getRoadCenterX(3, d);
-      const yDeck = getRoadElevationY(3, d);
-      if (yDeck < 2.2) continue;
-      const z = distanceToWorldZ(d);
-      const pierH = yDeck - 0.85;
-      for (const pxOff of [-6.8, 0, 6.8]) {
-        pushMatrix(pierM, cx + pxOff, pierH * 0.5, z, 0, 0, 0, 1, pierH, 1);
-      }
-      pushMatrix(pierCapM, cx, pierH - 0.35, z, 0, 0, 0, roadWidth + 0.8, 0.85, 1.9);
-    }
-
-    const shrubMesh = createInstancedBatch(
+    group.add(villaRoofMesh, bannerMesh, sunbeamMesh);
+  } else {
+    shrubMesh = createStreamingInstancedMesh(
       new THREE.IcosahedronGeometry(0.62, 1),
-      new THREE.MeshStandardMaterial({ map: foliageTex, color: HANOI_PALETTE.bougainvilleaLeaf, roughness: 0.9 }),
-      shrubM,
-      null,
+      new THREE.MeshStandardMaterial({
+        map: foliageTex,
+        color: HANOI_PALETTE.bougainvilleaLeaf,
+        roughness: 0.9
+      }),
+      460,
+      false,
       true,
       true,
       track
     );
-    if (shrubMesh) group.add(shrubMesh);
-
-    const blossomMesh = createInstancedBatch(
+    blossomMesh = createStreamingInstancedMesh(
       new THREE.IcosahedronGeometry(0.54, 1),
       new THREE.MeshStandardMaterial({
         map: foliageTex,
@@ -1729,269 +2075,449 @@ export function buildHanoiLandmarks(stageId: 1 | 2 | 3): LandmarksBuildResult {
         emissiveIntensity: 0.22,
         roughness: 0.72
       }),
-      blossomM,
-      blossomC,
+      760,
+      true,
       false,
       false,
       track
     );
-    if (blossomMesh) group.add(blossomMesh);
-
-    const pierMesh = createInstancedBatch(
+    pierMesh = createStreamingInstancedMesh(
       new THREE.CylinderGeometry(0.72, 0.82, 1, 12),
       new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.overpassConcrete, roughness: 0.85 }),
-      pierM,
-      null,
+      48,
+      false,
       true,
       true,
       track
     );
-    if (pierMesh) group.add(pierMesh);
-
-    const pierCapMesh = createInstancedBatch(
+    pierCapMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: 0xa69e90, roughness: 0.85 }),
-      pierCapM,
-      null,
+      20,
+      false,
       true,
       true,
       track
     );
-    if (pierCapMesh) group.add(pierCapMesh);
+    group.add(shrubMesh, blossomMesh, pierMesh, pierCapMesh);
 
     const modernTextures = ([0, 1, 2] as const).map((v) => track(createModernTowerTexture(v)));
-
-    ([0, 1] as const).forEach((mIdx) => {
-      const mMesh = createInstancedBatch(
+    midRiseMeshes = ([0, 1] as const).map((mIdx) => {
+      const m = createStreamingInstancedMesh(
         new THREE.BoxGeometry(1, 1, 1),
-        new THREE.MeshStandardMaterial({
-          map: modernTextures[mIdx + 1],
-          roughness: 0.72
-        }),
-        midRiseM[mIdx],
-        null,
+        new THREE.MeshStandardMaterial({ map: modernTextures[mIdx + 1], roughness: 0.72 }),
+        60,
+        false,
         false,
         true,
         track
       );
-      if (mMesh) group.add(mMesh);
-    });
+      group.add(m);
+      return m;
+    }) as [THREE.InstancedMesh, THREE.InstancedMesh];
 
-    ([0, 1, 2] as const).forEach((v) => {
-      const tMesh = createInstancedBatch(
+    towerMeshes = ([0, 1, 2] as const).map((v) => {
+      const m = createStreamingInstancedMesh(
         new THREE.BoxGeometry(1, 1, 1),
         new THREE.MeshStandardMaterial({ map: modernTextures[v], roughness: 0.65 }),
-        towerM[v],
-        null,
+        60,
+        false,
         false,
         true,
         track
       );
-      if (tMesh) group.add(tMesh);
-    });
+      group.add(m);
+      return m;
+    }) as [THREE.InstancedMesh, THREE.InstancedMesh, THREE.InstancedMesh];
 
-    const crownMesh = createInstancedBatch(
+    towerCrownMesh = createStreamingInstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: 0xc9c2b6, roughness: 0.74 }),
-      towerCrownM,
-      null,
+      140,
+      false,
       false,
       true,
       track
     );
-    if (crownMesh) group.add(crownMesh);
-
-    // Finish Arch (B) + Trung Tâm Thủ Đô Victory Plaza at 1950m
-    const finishArch = createGateArch(
-      roadWidth,
-      'TRUNG TÂM THỦ ĐÔ (B)',
-      'ĐÍCH CUỐI · HOÀN THÀNH TOÀN TUYẾN HÀ NỘI',
-      '#da251d',
-      '#ffcd00',
-      HANOI_PALETTE.oldQuarterYellow,
-      track
-    );
-    finishArch.position.set(
-      getRoadCenterX(3, stage.length),
-      0,
-      distanceToWorldZ(stage.length)
-    );
-    finishArch.rotation.y = getRoadTangentYaw(3, stage.length);
-    group.add(finishArch);
-
-    const monument = new THREE.Group();
-    const stoneMatMon = track(
-      new THREE.MeshStandardMaterial({ map: shaftTex, roughness: 0.68 })
-    );
-    const graniteBaseMat = track(
-      new THREE.MeshStandardMaterial({ color: 0x8f887d, roughness: 0.78 })
-    );
-    const goldMat = track(
-      new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.flagStarYellow, roughness: 0.35, metalness: 0.35 })
-    );
-
-    const step1 = new THREE.Mesh(track(new THREE.CylinderGeometry(8.2, 8.8, 0.9, 8)), graniteBaseMat);
-    step1.position.y = 0.45;
-    monument.add(step1);
-
-    const step2 = new THREE.Mesh(track(new THREE.CylinderGeometry(6.0, 6.6, 1.0, 8)), stoneMatMon);
-    step2.position.y = 1.4;
-    monument.add(step2);
-
-    const plinth = new THREE.Mesh(track(new THREE.CylinderGeometry(3.8, 4.4, 2.2, 8)), graniteBaseMat);
-    plinth.position.y = 3.0;
-    monument.add(plinth);
-
-    const goldRing = new THREE.Mesh(track(new THREE.CylinderGeometry(3.2, 3.4, 0.45, 8)), goldMat);
-    goldRing.position.y = 4.25;
-    monument.add(goldRing);
-
-    const obelisk = new THREE.Mesh(track(new THREE.CylinderGeometry(1.05, 2.1, 13.5, 4)), stoneMatMon);
-    obelisk.rotation.y = Math.PI / 4;
-    obelisk.position.y = 11.2;
-    monument.add(obelisk);
-
-    const lotusCollar = new THREE.Mesh(track(new THREE.CylinderGeometry(1.75, 1.1, 1.1, 8)), goldMat);
-    lotusCollar.position.y = 18.2;
-    monument.add(lotusCollar);
-
-    const starTop = new THREE.Mesh(track(new THREE.OctahedronGeometry(1.35, 0)), goldMat);
-    starTop.position.y = 19.7;
-    monument.add(starTop);
-
-    monument.position.set(
-      getRoadCenterX(3, stage.length + 34),
-      0,
-      distanceToWorldZ(stage.length + 34)
-    );
-    group.add(monument);
+    group.add(towerCrownMesh);
   }
 
   // ============================================================================
-  // SHARED INSTANCED BARK TRUNKS, BRANCHES, LEAFY CANOPIES, LAMPS & FLAGS
+  // START (A), Ô QUAN CHƯỞNG (STAGE 8), & FINISH (B) + HERO DESTINATION LANDMARK
   // ============================================================================
-  const trunkMesh = createInstancedBatch(
-    new THREE.CylinderGeometry(0.24, 0.42, 5.2, 8),
-    new THREE.MeshStandardMaterial({ map: barkTex, roughness: 0.92 }),
-    trunkMatrices,
-    null,
-    true,
-    true,
+  const archColors: Record<1 | 2 | 3, { bg: string; border: string; pillar: number }> = {
+    1: { bg: '#155b94', border: '#ffcd00', pillar: HANOI_PALETTE.overpassConcrete },
+    2: { bg: '#0f6b70', border: '#f6eedc', pillar: HANOI_PALETTE.shutterTealDark },
+    3: { bg: '#5b3a22', border: '#e3a837', pillar: HANOI_PALETTE.oldQuarterYellow }
+  };
+  const ac = archColors[stage.chapter];
+
+  const startArch = createGateArch(
+    roadWidth,
+    stage.fromLabel.toUpperCase(),
+    `CHẶNG ${stage.codeLabel} · ${stage.shortName.toUpperCase()} · ${stage.laneCount} LÀN (${(stage.length / 1000).toFixed(0)} KM)`,
+    ac.bg,
+    ac.border,
+    ac.pillar,
     track
   );
-  if (trunkMesh) group.add(trunkMesh);
+  startArch.position.set(
+    getRoadCenterX(stageId, 16),
+    getRoadElevationY(stageId, 16),
+    distanceToWorldZ(16)
+  );
+  startArch.rotation.y = getRoadTangentYaw(stageId, 16);
+  group.add(startArch);
 
-  const branchMesh = createInstancedBatch(
-    new THREE.CylinderGeometry(0.11, 0.2, 2.5, 6),
-    new THREE.MeshStandardMaterial({ map: barkTex, roughness: 0.92 }),
-    branchMatrices,
-    null,
-    true,
-    true,
+  let oqcGate: THREE.Group | null = null;
+  if (stageId === 8) {
+    oqcGate = buildOQuanChuongGate(roadWidth, stoneTex, roofTex, flagTex, track);
+    oqcGate.position.set(getRoadCenterX(stageId, 650), 0, distanceToWorldZ(650));
+    oqcGate.rotation.y = getRoadTangentYaw(stageId, 650);
+    oqcGate.visible = false;
+    group.add(oqcGate);
+  }
+
+  const finishHologram = createFinishHologram(
+    roadWidth,
+    `ĐÍCH ĐẾN · CHẶNG ${stage.codeLabel} · ${(stage.length / 1000).toFixed(0)} KM`,
+    stage.toLabel.toUpperCase(),
+    `HOÀN THÀNH CHẶNG ${stage.codeLabel} · ${stage.shortName.toUpperCase()}`,
+    '#ffcd00',
     track
   );
-  if (branchMesh) group.add(branchMesh);
+  finishHologram.group.position.set(
+    getRoadCenterX(stageId, stage.length),
+    getRoadElevationY(stageId, stage.length),
+    distanceToWorldZ(stage.length)
+  );
+  finishHologram.group.rotation.y = getRoadTangentYaw(stageId, stage.length);
+  finishHologram.group.visible = false;
+  group.add(finishHologram.group);
 
-  const limeMesh = createInstancedBatch(
-    new THREE.CylinderGeometry(0.4, 0.46, 1.45, 8),
-    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.treeLimeBase, roughness: 0.9 }),
-    limeBaseMatrices,
-    null,
-    false,
-    true,
+  const heroGroup = new THREE.Group();
+  const heroLandmark = buildDestinationLandmark(
+    stage.destinationKey,
+    {
+      colonialTex0,
+      colonialTex1,
+      roofTex,
+      shaftTex,
+      stoneTex,
+      operaFacadeTex,
+      flagTex
+    },
     track
   );
-  if (limeMesh) group.add(limeMesh);
-
-  const canopyMesh = createInstancedBatch(
-    new THREE.IcosahedronGeometry(1.0, 1),
-    new THREE.MeshStandardMaterial({ map: foliageTex, color: 0xffffff, roughness: 0.85 }),
-    canopyMatrices,
-    canopyColors,
-    true,
-    true,
-    track
+  heroLandmark.position.set(
+    getRoadCenterX(stageId, stage.length + 38),
+    0,
+    distanceToWorldZ(stage.length + 38)
   );
-  if (canopyMesh) group.add(canopyMesh);
+  heroLandmark.rotation.y = getRoadTangentYaw(stageId, stage.length) * 0.4;
+  heroGroup.add(heroLandmark);
 
-  const poleMesh = createInstancedBatch(
-    new THREE.CylinderGeometry(0.08, 0.11, 7.2, 8),
-    new THREE.MeshStandardMaterial({ color: HANOI_PALETTE.shutterTealDark, roughness: 0.55, metalness: 0.35 }),
-    poleMatrices,
-    null,
-    false,
-    false,
-    track
+  // Horizon-sealing backdrop behind Finish Destination
+  const cxEnd = getRoadCenterX(stageId, stage.length);
+  const bgMat = track(
+    new THREE.MeshStandardMaterial({
+      map: stage.theme === 'overpass_avenue' ? track(createModernTowerTexture(0)) : colonialTex0,
+      roughness: 0.85
+    })
   );
-  if (poleMesh) group.add(poleMesh);
-
-  const lampMesh = createInstancedBatch(
-    new THREE.SphereGeometry(0.24, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0xfff0c2 }),
-    lampHeadMatrices,
-    null,
-    false,
-    false,
-    track
-  );
-  if (lampMesh) group.add(lampMesh);
-
-  if (flagData.length > 0) {
-    const flagGeo = track(new THREE.PlaneGeometry(1.4, 0.95));
-    const flagTex = track(createFlagTexture());
-    const flagMat = track(
-      new THREE.MeshBasicMaterial({ map: flagTex, side: THREE.DoubleSide })
+  const bgGeo = track(new THREE.BoxGeometry(1, 1, 1));
+  const bgMats: THREE.Matrix4[] = [];
+  for (let i = -4; i <= 4; i++) {
+    if (Math.abs(i) < 2) continue;
+    const bh = stage.theme === 'overpass_avenue' ? 24 + (Math.abs(i) % 3) * 7 : 12 + (Math.abs(i) % 3) * 3;
+    bgMats.push(
+      makeMat(
+        cxEnd + i * 21,
+        bh * 0.5,
+        distanceToWorldZ(stage.length + 58 + Math.abs(i) * 4),
+        0,
+        0,
+        0,
+        20,
+        bh,
+        14
+      )
     );
-    const flagInst = new THREE.InstancedMesh(flagGeo, flagMat, flagData.length);
-    for (let i = 0; i < flagData.length; i++) {
-      const f = flagData[i];
+  }
+  let bgInst: THREE.InstancedMesh | null = null;
+  if (bgMats.length > 0) {
+    bgInst = new THREE.InstancedMesh(bgGeo, bgMat, bgMats.length);
+    bgMats.forEach((m, idx) => bgInst!.setMatrixAt(idx, m));
+    bgInst.instanceMatrix.needsUpdate = true;
+    heroGroup.add(bgInst);
+  }
+  heroGroup.visible = false;
+  group.add(heroGroup);
+
+  let attachedHeroGlb: THREE.Group | null = null;
+  let heroGlbLoaded = false;
+
+  const setHeroGlb = (glb: THREE.Group, config: LandmarkGlbConfig): void => {
+    if (attachedHeroGlb) {
+      heroGroup.remove(attachedHeroGlb);
+      disposeLandmarkObject(attachedHeroGlb);
+      attachedHeroGlb = null;
+    }
+    heroLandmark.visible = false;
+    if (bgInst) bgInst.visible = false;
+
+    const targetDist = stage.length + config.offsetAhead;
+    glb.position.set(
+      getRoadCenterX(stageId, targetDist),
+      getRoadElevationY(stageId, targetDist),
+      distanceToWorldZ(targetDist)
+    );
+    glb.rotation.y = getRoadTangentYaw(stageId, stage.length) * 0.4 + config.yawOffset;
+    heroGroup.add(glb);
+    attachedHeroGlb = glb;
+    heroGlbLoaded = true;
+  };
+
+  // ============================================================================
+  // STREAMING UPDATE LOOP
+  // ============================================================================
+  const writeMatrices = (
+    mesh: THREE.InstancedMesh | null,
+    matrices: THREE.Matrix4[],
+    colors?: THREE.Color[]
+  ): void => {
+    if (!mesh) return;
+    const n = Math.min(matrices.length, mesh.instanceMatrix.count);
+    for (let i = 0; i < n; i++) {
+      mesh.setMatrixAt(i, matrices[i]);
+      if (colors && colors[i] && mesh.instanceColor) {
+        mesh.setColorAt(i, colors[i]);
+      }
+    }
+    mesh.count = n;
+    mesh.instanceMatrix.needsUpdate = true;
+    if (colors && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  };
+
+  let lastMinChunk = Number.NaN;
+  let lastMaxChunk = Number.NaN;
+  let activeSceneryChunks = 0;
+  let visibleFlags: AnimatedFlagRecord[] = [];
+
+  // Reusable flat scratch buffers to collect matrices across visible chunks
+  const scratch = createEmptyChunkData();
+
+  const clearScratch = (): void => {
+    scratch.trunk.length = 0;
+    scratch.branch.length = 0;
+    scratch.limeBase.length = 0;
+    scratch.canopy.length = 0;
+    scratch.canopyColor.length = 0;
+    scratch.pole.length = 0;
+    scratch.lampHead.length = 0;
+    scratch.flags.length = 0;
+    scratch.house[0].length = 0;
+    scratch.house[1].length = 0;
+    scratch.house[2].length = 0;
+    scratch.roof.length = 0;
+    scratch.waterTank.length = 0;
+    scratch.awning.length = 0;
+    scratch.balcony.length = 0;
+    for (const s of scratch.signs) s.length = 0;
+    scratch.stool.length = 0;
+    scratch.pot.length = 0;
+    scratch.potFlower.length = 0;
+    scratch.wires.length = 0;
+    scratch.villa[0].length = 0;
+    scratch.villa[1].length = 0;
+    scratch.villaRoof.length = 0;
+    scratch.banner.length = 0;
+    scratch.sunbeam.length = 0;
+    scratch.shrub.length = 0;
+    scratch.blossom.length = 0;
+    scratch.blossomColor.length = 0;
+    scratch.pier.length = 0;
+    scratch.pierCap.length = 0;
+    scratch.midRise[0].length = 0;
+    scratch.midRise[1].length = 0;
+    scratch.tower[0].length = 0;
+    scratch.tower[1].length = 0;
+    scratch.tower[2].length = 0;
+    scratch.towerCrown.length = 0;
+  };
+
+  const appendArr = <T>(dst: T[], src: T[]): void => {
+    for (let i = 0; i < src.length; i++) dst.push(src[i]);
+  };
+
+  const update = (playerDistance: number, elapsedTime: number): void => {
+    const safeDist = Math.max(0, playerDistance);
+    const minDist = Math.max(0, safeDist - STREAM_BACK);
+    const maxDist = Math.min(stage.length + 60, safeDist + STREAM_AHEAD);
+    const minChunk = Math.floor(minDist / SCENERY_CHUNK_LEN);
+    const maxChunk = Math.floor(maxDist / SCENERY_CHUNK_LEN);
+
+    if (minChunk !== lastMinChunk || maxChunk !== lastMaxChunk) {
+      lastMinChunk = minChunk;
+      lastMaxChunk = maxChunk;
+      clearScratch();
+      activeSceneryChunks = 0;
+
+      for (let c = minChunk; c <= maxChunk; c++) {
+        const ch = generateChunkData(c);
+        activeSceneryChunks += 1;
+        appendArr(scratch.trunk, ch.trunk);
+        appendArr(scratch.branch, ch.branch);
+        appendArr(scratch.limeBase, ch.limeBase);
+        appendArr(scratch.canopy, ch.canopy);
+        appendArr(scratch.canopyColor, ch.canopyColor);
+        appendArr(scratch.pole, ch.pole);
+        appendArr(scratch.lampHead, ch.lampHead);
+        appendArr(scratch.flags, ch.flags);
+
+        if (stage.theme === 'old_quarter') {
+          appendArr(scratch.house[0], ch.house[0]);
+          appendArr(scratch.house[1], ch.house[1]);
+          appendArr(scratch.house[2], ch.house[2]);
+          appendArr(scratch.roof, ch.roof);
+          appendArr(scratch.waterTank, ch.waterTank);
+          appendArr(scratch.awning, ch.awning);
+          appendArr(scratch.balcony, ch.balcony);
+          for (let s = 0; s < 8; s++) appendArr(scratch.signs[s], ch.signs[s]);
+          appendArr(scratch.stool, ch.stool);
+          appendArr(scratch.pot, ch.pot);
+          appendArr(scratch.potFlower, ch.potFlower);
+          appendArr(scratch.wires, ch.wires);
+        } else if (stage.theme === 'tree_boulevard') {
+          appendArr(scratch.villa[0], ch.villa[0]);
+          appendArr(scratch.villa[1], ch.villa[1]);
+          appendArr(scratch.villaRoof, ch.villaRoof);
+          appendArr(scratch.banner, ch.banner);
+          appendArr(scratch.sunbeam, ch.sunbeam);
+        } else {
+          appendArr(scratch.shrub, ch.shrub);
+          appendArr(scratch.blossom, ch.blossom);
+          appendArr(scratch.blossomColor, ch.blossomColor);
+          appendArr(scratch.pier, ch.pier);
+          appendArr(scratch.pierCap, ch.pierCap);
+          appendArr(scratch.midRise[0], ch.midRise[0]);
+          appendArr(scratch.midRise[1], ch.midRise[1]);
+          appendArr(scratch.tower[0], ch.tower[0]);
+          appendArr(scratch.tower[1], ch.tower[1]);
+          appendArr(scratch.tower[2], ch.tower[2]);
+          appendArr(scratch.towerCrown, ch.towerCrown);
+        }
+      }
+
+      writeMatrices(trunkMesh, scratch.trunk);
+      writeMatrices(branchMesh, scratch.branch);
+      writeMatrices(limeMesh, scratch.limeBase);
+      writeMatrices(canopyMesh, scratch.canopy, scratch.canopyColor);
+      writeMatrices(poleMesh, scratch.pole);
+      writeMatrices(lampMesh, scratch.lampHead);
+      visibleFlags = scratch.flags;
+
+      if (stage.theme === 'old_quarter') {
+        if (houseMeshes) {
+          writeMatrices(houseMeshes[0], scratch.house[0]);
+          writeMatrices(houseMeshes[1], scratch.house[1]);
+          writeMatrices(houseMeshes[2], scratch.house[2]);
+        }
+        writeMatrices(roofMesh, scratch.roof);
+        writeMatrices(waterTankMesh, scratch.waterTank);
+        writeMatrices(awningMesh, scratch.awning);
+        writeMatrices(balconyMesh, scratch.balcony);
+        for (let s = 0; s < signMeshes.length; s++) {
+          writeMatrices(signMeshes[s], scratch.signs[s]);
+        }
+        writeMatrices(stoolMesh, scratch.stool);
+        writeMatrices(potMesh, scratch.pot);
+        writeMatrices(potFlowerMesh, scratch.potFlower);
+        if (wireGeo) {
+          const posAttr = wireGeo.getAttribute('position') as THREE.BufferAttribute;
+          const arr = posAttr.array as Float32Array;
+          const numFloats = Math.min(scratch.wires.length, MAX_WIRE_VERTS * 3);
+          for (let i = 0; i < numFloats; i++) {
+            arr[i] = scratch.wires[i];
+          }
+          posAttr.needsUpdate = true;
+          wireGeo.setDrawRange(0, Math.floor(numFloats / 3));
+        }
+      } else if (stage.theme === 'tree_boulevard') {
+        if (villaMeshes) {
+          writeMatrices(villaMeshes[0], scratch.villa[0]);
+          writeMatrices(villaMeshes[1], scratch.villa[1]);
+        }
+        writeMatrices(villaRoofMesh, scratch.villaRoof);
+        writeMatrices(bannerMesh, scratch.banner);
+        writeMatrices(sunbeamMesh, scratch.sunbeam);
+      } else {
+        writeMatrices(shrubMesh, scratch.shrub);
+        writeMatrices(blossomMesh, scratch.blossom, scratch.blossomColor);
+        writeMatrices(pierMesh, scratch.pier);
+        writeMatrices(pierCapMesh, scratch.pierCap);
+        if (midRiseMeshes) {
+          writeMatrices(midRiseMeshes[0], scratch.midRise[0]);
+          writeMatrices(midRiseMeshes[1], scratch.midRise[1]);
+        }
+        if (towerMeshes) {
+          writeMatrices(towerMeshes[0], scratch.tower[0]);
+          writeMatrices(towerMeshes[1], scratch.tower[1]);
+          writeMatrices(towerMeshes[2], scratch.tower[2]);
+        }
+        writeMatrices(towerCrownMesh, scratch.towerCrown);
+      }
+    }
+
+    // Animate visible flags smoothly
+    const flagCount = Math.min(visibleFlags.length, flagInst.instanceMatrix.count);
+    for (let i = 0; i < flagCount; i++) {
+      const f = visibleFlags[i];
       dummy.position.set(f.x, f.y, f.z);
-      dummy.rotation.set(0, f.yaw, 0);
-      dummy.scale.set(f.sx, f.sy, f.sz);
+      dummy.rotation.set(
+        Math.sin(elapsedTime * 3.4 + f.phase) * 0.08,
+        f.baseYaw + Math.sin(elapsedTime * 4.2 + f.phase) * 0.18,
+        0
+      );
+      dummy.scale.set(f.scaleX, f.scaleY, f.scaleZ);
       dummy.updateMatrix();
       flagInst.setMatrixAt(i, dummy.matrix);
-      animatedFlags.push({
-        mesh: flagInst,
-        index: i,
-        x: f.x,
-        y: f.y,
-        z: f.z,
-        baseYaw: f.yaw,
-        scaleX: f.sx,
-        scaleY: f.sy,
-        scaleZ: f.sz,
-        phase: f.phase
-      });
     }
-    flagInst.instanceMatrix.needsUpdate = true;
-    group.add(flagInst);
-  }
+    flagInst.count = flagCount;
+    if (flagCount > 0) flagInst.instanceMatrix.needsUpdate = true;
+
+    // Toggle Start / Ô Quan Chưởng / Finish hero visibility
+    startArch.visible = safeDist <= 420;
+    if (oqcGate) {
+      oqcGate.visible = safeDist >= 260 && safeDist <= 760;
+    }
+    const nearFinish = safeDist >= stage.length - 460;
+    finishHologram.group.visible = nearFinish;
+    if (nearFinish) {
+      finishHologram.textMesh.position.y =
+        finishHologram.baseY + Math.sin(elapsedTime * 2.1) * 0.22;
+      finishHologram.textMat.opacity = 0.78 + Math.sin(elapsedTime * 3.8) * 0.08;
+    }
+    heroGroup.visible = nearFinish;
+  };
+
+  update(0, 0);
 
   return {
     group,
-    update: (playerDistance: number, elapsedTime: number) => {
-      if (animatedFlags.length === 0) return;
-      const minZ = distanceToWorldZ(playerDistance + 220);
-      const maxZ = distanceToWorldZ(Math.max(0, playerDistance - 25));
-      let touched = false;
-      for (const f of animatedFlags) {
-        if (f.z < minZ || f.z > maxZ) continue;
-        dummy.position.set(f.x, f.y, f.z);
-        dummy.rotation.set(
-          Math.sin(elapsedTime * 3.4 + f.phase) * 0.08,
-          f.baseYaw + Math.sin(elapsedTime * 4.2 + f.phase) * 0.18,
-          0
-        );
-        dummy.scale.set(f.scaleX, f.scaleY, f.scaleZ);
-        dummy.updateMatrix();
-        f.mesh.setMatrixAt(f.index, dummy.matrix);
-        touched = true;
-      }
-      if (touched) {
-        animatedFlags[0].mesh.instanceMatrix.needsUpdate = true;
-      }
-    },
+    update,
+    setHeroGlb,
+    getStreamingStats: () => ({
+      activeSceneryChunks,
+      drawCallObjects: group.children.filter((c) => c.visible).length,
+      heroGlbLoaded
+    }),
     dispose: () => {
+      if (attachedHeroGlb) {
+        heroGroup.remove(attachedHeroGlb);
+        disposeLandmarkObject(attachedHeroGlb);
+        attachedHeroGlb = null;
+      }
       for (const item of disposables) {
         item.dispose();
       }

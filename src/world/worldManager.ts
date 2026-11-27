@@ -1,18 +1,34 @@
 import * as THREE from 'three';
 import {
-  STAGE_ATMOSPHERES,
+  getStageAtmosphere,
   type StageAtmosphere
 } from '../config/artPalette.ts';
+import { getStageSpec, type StageId } from '../config/gameConfig.ts';
 import {
   distanceToWorldZ,
   getRoadCenterX,
   getRoadElevationY
 } from '../core/roadMath.ts';
 import { buildHanoiLandmarks, type LandmarksBuildResult } from './hanoiLandmarks.ts';
-import { buildHanoiRoad, type RoadBuildResult } from './hanoiRoad.ts';
+import {
+  buildHanoiRoad,
+  type RoadBuildResult,
+  type RoadStreamingStats
+} from './hanoiRoad.ts';
 import { createHanoiEnvMap } from './environmentMap.ts';
+import {
+  disposeLandmarkLoaderWorkers,
+  disposeLandmarkObject,
+  loadDestinationLandmarkGlb
+} from './landmarkLoader.ts';
 
-function createRetroSkyTexture(atmo: StageAtmosphere): THREE.CanvasTexture {
+function createRetroSkyTexture(atmo: StageAtmosphere): THREE.Texture {
+  if (typeof document === 'undefined') {
+    const tex = new THREE.DataTexture(new Uint8Array([180, 175, 165, 255]), 1, 1, THREE.RGBAFormat);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 256;
@@ -59,21 +75,33 @@ function createRetroSkyTexture(atmo: StageAtmosphere): THREE.CanvasTexture {
   return tex;
 }
 
+export interface WorldStreamingStats {
+  stageId: StageId | null;
+  road: RoadStreamingStats | null;
+  landmarks: {
+    activeSceneryChunks: number;
+    drawCallObjects: number;
+    heroGlbLoaded: boolean;
+  } | null;
+}
+
 /**
- * Facade managing stage scenery, road geometry, landmarks, golden-hour lighting,
+ * Facade managing stage scenery, streaming road geometry, landmarks, golden-hour lighting,
  * PMREM environment map, sky dome, and tight shadow tracking for Hanoi Shipper 3D Retro.
  */
 export class HanoiWorldManager {
   private readonly scene: THREE.Scene;
   private readonly renderer?: THREE.WebGLRenderer;
-  private stageId: 1 | 2 | 3 | null = null;
+  private stageId: StageId | null = null;
+  private stageBuildToken = 0;
   private elapsedTime = 0;
+  private lastPlayerDistance = 0;
 
   private roadBuild: RoadBuildResult | null = null;
   private landmarksBuild: LandmarksBuildResult | null = null;
 
   private skyDome: THREE.Mesh | null = null;
-  private skyTex: THREE.CanvasTexture | null = null;
+  private skyTex: THREE.Texture | null = null;
   private envMap: THREE.Texture | null = null;
 
   private hemiLight: THREE.HemisphereLight | null = null;
@@ -86,7 +114,7 @@ export class HanoiWorldManager {
     this.renderer = renderer;
   }
 
-  public getStageId(): 1 | 2 | 3 | null {
+  public getStageId(): StageId | null {
     return this.stageId;
   }
 
@@ -101,15 +129,36 @@ export class HanoiWorldManager {
     }
   }
 
-  public buildStage(stageId: 1 | 2 | 3): void {
+  public triggerCameraFlash(cameraId: number): void {
+    this.roadBuild?.triggerCameraFlash(cameraId);
+  }
+
+  public getStreamingStats(): WorldStreamingStats {
+    return {
+      stageId: this.stageId,
+      road: this.roadBuild?.getStreamingStats() ?? null,
+      landmarks: this.landmarksBuild?.getStreamingStats?.() ?? null
+    };
+  }
+
+  public buildStage(stageId: StageId): void {
     this.disposeStage();
 
     this.stageId = stageId;
     this.elapsedTime = 0;
+    this.lastPlayerDistance = 0;
+    const buildToken = this.stageBuildToken;
 
-    const atmo = STAGE_ATMOSPHERES[stageId];
+    const stage = getStageSpec(stageId);
+    const atmo = getStageAtmosphere(stageId);
     this.scene.background = new THREE.Color(atmo.skyHorizon);
-    this.scene.fog = new THREE.FogExp2(atmo.fogColor, 0.0046);
+    const fogDensity =
+      stage.theme === 'tree_boulevard'
+        ? 0.0049
+        : stage.theme === 'old_quarter'
+          ? 0.0048
+          : 0.0042;
+    this.scene.fog = new THREE.FogExp2(atmo.fogColor, fogDensity);
 
     if (this.renderer) {
       this.envMap = createHanoiEnvMap(this.renderer, atmo);
@@ -132,7 +181,7 @@ export class HanoiWorldManager {
     // 2. Contrast-Rich Golden-Hour Lighting (balanced ambient so shadows stay crisp)
     this.hemiLight = new THREE.HemisphereLight(
       atmo.skyTop,
-      0x594a3c,
+      stage.theme === 'tree_boulevard' ? 0x3b4d31 : 0x594a3c,
       atmo.ambientIntensity
     );
     this.scene.add(this.hemiLight);
@@ -150,7 +199,7 @@ export class HanoiWorldManager {
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 4;
     this.sunLight.shadow.camera.far = 125;
-    const d = stageId === 3 ? 28 : 22;
+    const d = stage.laneCount === 6 ? 28 : 22;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -166,7 +215,7 @@ export class HanoiWorldManager {
     this.scene.add(this.fillLight);
     this.scene.add(this.fillLight.target);
 
-    // 3. Road & Landmarks
+    // 3. Streaming Road & Landmarks
     this.roadBuild = buildHanoiRoad(stageId);
     this.scene.add(this.roadBuild.group);
 
@@ -174,13 +223,34 @@ export class HanoiWorldManager {
     this.scene.add(this.landmarksBuild.group);
 
     this.update(0, 0);
+
+    void loadDestinationLandmarkGlb(stage.destinationKey)
+      .then((loaded) => {
+        if (!loaded) return;
+        if (
+          buildToken !== this.stageBuildToken ||
+          this.stageId !== stageId ||
+          !this.landmarksBuild
+        ) {
+          disposeLandmarkObject(loaded.group);
+          return;
+        }
+        this.landmarksBuild.setHeroGlb(loaded.group, loaded.config);
+        this.landmarksBuild.update(this.lastPlayerDistance, this.elapsedTime);
+      })
+      .catch((err) => {
+        console.warn(`[worldManager] Hero GLB attach failed for ${stage.destinationKey}:`, err);
+      });
   }
 
-  public update(playerDistance: number, dt: number): void {
+  public update(playerDistance: number, dt: number, trafficElapsedTime?: number): void {
     if (this.stageId === null) return;
     this.elapsedTime += Math.max(0, dt);
+    const signalTime = trafficElapsedTime ?? this.elapsedTime;
 
-    const focusDist = Math.max(0, playerDistance) + 16;
+    const safeDist = Math.max(0, playerDistance);
+    this.lastPlayerDistance = safeDist;
+    const focusDist = safeDist + 16;
     const fx = getRoadCenterX(this.stageId, focusDist);
     const fy = getRoadElevationY(this.stageId, focusDist);
     const fz = distanceToWorldZ(focusDist);
@@ -205,12 +275,18 @@ export class HanoiWorldManager {
       this.skyDome.position.set(fx, fy, fz);
     }
 
+    if (this.roadBuild) {
+      this.roadBuild.update(safeDist, signalTime, dt);
+    }
+
     if (this.landmarksBuild) {
-      this.landmarksBuild.update(Math.max(0, playerDistance), this.elapsedTime);
+      this.landmarksBuild.update(safeDist, this.elapsedTime);
     }
   }
 
   public disposeStage(): void {
+    this.stageBuildToken += 1;
+
     if (this.roadBuild) {
       this.scene.remove(this.roadBuild.group);
       this.roadBuild.dispose();
@@ -258,5 +334,10 @@ export class HanoiWorldManager {
     }
 
     this.stageId = null;
+  }
+
+  public dispose(): void {
+    this.disposeStage();
+    disposeLandmarkLoaderWorkers();
   }
 }

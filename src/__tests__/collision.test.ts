@@ -136,7 +136,7 @@ describe('collision & gameState lifecycle', () => {
     expect(cooldown.canCollide()).toBe(true);
   });
 
-  it('transitions through 3 stages A->B to Victory and resets cleanly on Restart after Game Over', () => {
+  it('transitions through 9 stages A->B to Victory and resets cleanly on Restart after Game Over', () => {
     const initial = createInitialGameState('vinfast', 'hard');
     expect(initial.screen).toBe('menu');
 

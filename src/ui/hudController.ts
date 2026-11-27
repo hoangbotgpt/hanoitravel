@@ -5,17 +5,37 @@ import {
   STAGES,
   type BikeId,
   type DifficultyId,
-  type ObstacleTypeId
+  type ObstacleTypeId,
+  type StageId
 } from '../config/gameConfig.ts';
 import { formatVND } from '../core/economy.ts';
 import type { CrashPhase } from '../core/crashSequence.ts';
 import type { GameScreen, GameSessionState } from '../core/gameState.ts';
+import { createDefaultProfile, type PlayerProfile } from '../core/profileStore.ts';
+import { getRoadCenterX } from '../core/roadMath.ts';
+import {
+  getStageRouteFeatures,
+  getTrafficLightState,
+  type SpeedCameraZone,
+  type StageRouteFeatures,
+  type TrafficLightColor
+} from '../core/routeFeatures.ts';
 import { isOncomingLane } from '../core/trafficRules.ts';
+import type { ColdFineSettlement, RecordedViolation } from '../core/violations.ts';
 import type { PlayerInputState } from '../gameplay/playerController.ts';
+import { ShopModal } from './shopModal.ts';
+
+export interface RearThreatView {
+  active: boolean;
+  distanceMeters: number;
+  lateralDelta: number;
+  isReckless: boolean;
+}
 
 export interface HudCallbacks {
   onSelectBike: (bikeId: BikeId) => void;
   onSelectDifficulty: (difficultyId: DifficultyId) => void;
+  onSelectStage?: (stageId: StageId) => void;
   onStartGame: () => void;
   onTogglePause: () => void;
   onNextStage: () => void;
@@ -26,6 +46,10 @@ export interface HudCallbacks {
   onToggleRetroEffect: () => boolean;
   onTouchInput: (partial: Partial<PlayerInputState>) => void;
   onHorn: () => void;
+  onOpenShop?: () => void;
+  onCloseShop?: () => void;
+  onPurchaseBike?: (bikeId: BikeId, priceVnd: number) => boolean;
+  onTestRideBike?: (bikeId: BikeId) => void;
 }
 
 export interface HudFrameView {
@@ -34,16 +58,31 @@ export interface HudFrameView {
   invulnRemaining: number;
   crashPhase?: CrashPhase;
   lateralOffset?: number;
+  isBraking?: boolean;
+  careerWallet?: number;
+  totalDeliveries?: number;
+  pendingFineCount?: number;
+  pendingFineTotal?: number;
+  routeFeatures?: StageRouteFeatures | null;
+  elapsedStageTime?: number;
+  upcomingLight?: TrafficLightColor | null;
+  upcomingCamera?: SpeedCameraZone | null;
+  speedLimitKmh?: number;
+  rearThreat?: RearThreatView | null;
 }
 
 const OBSTACLE_TOAST_NAME: Record<ObstacleTypeId, string> = {
   motorbike: 'xe máy',
+  reckless_moto: 'xe máy vượt ẩu',
   flower_bike: 'xe đạp hoa',
   vendor: 'gánh hàng rong',
+  tourist: 'khách du lịch',
+  office_worker: 'dân công sở',
   car: 'ô tô',
   taxi: 'taxi điện Xanh SM',
   bus: 'xe buýt VinBus',
-  truck: 'xe tải Canter'
+  truck: 'xe tải Canter 1,9T',
+  heavy_truck: 'xe tải hạng nặng'
 };
 
 function getRequiredEl<T extends HTMLElement>(id: string): T {
@@ -54,11 +93,12 @@ function getRequiredEl<T extends HTMLElement>(id: string): T {
   return el as T;
 }
 
-function formatDuration(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function formatMeters(meters: number): string {
@@ -69,8 +109,66 @@ function formatDecimalComma(num: number): string {
   return num.toFixed(1).replace('.', ',');
 }
 
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+function formatRemainingDistance(remainingMeters: number): string {
+  const clamped = Math.max(0, remainingMeters);
+  if (clamped >= 1000) {
+    const km = Math.round((clamped / 1000) * 100) / 100;
+    return `Còn ${km.toFixed(2).replace('.', ',')} km`;
+  }
+  return `Còn ${formatMeters(clamped)} m`;
+}
+
 function createStarSvg(lit: boolean): string {
   return `<svg class="star-icon${lit ? ' lit' : ''}" viewBox="0 0 24 24" fill="${lit ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+}
+
+function renderColdFinesLedger(
+  container: HTMLElement,
+  settlement: ColdFineSettlement | null | undefined
+): void {
+  if (
+    !settlement ||
+    (settlement.violations.length === 0 && !settlement.bankruptByColdFines)
+  ) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  const netPrefix = settlement.netChange >= 0 ? '+' : '−';
+  const netAbs = formatVND(Math.abs(settlement.netChange));
+  const netClass = settlement.netChange >= 0 ? 'gold-text' : 'danger-text';
+
+  const tagsHtml = settlement.violations
+    .map(
+      (v) =>
+        `<span class="fine-tag">📷 ${escapeHtml(v.label)} (${formatMeters(v.distanceMeters)}m) · −${formatVND(v.amount)}</span>`
+    )
+    .join('');
+
+  container.innerHTML = `
+    <div class="fines-ledger-summary">
+      <span>Tổng tiền thưởng</span>
+      <strong>+${formatVND(settlement.grossReward)}</strong>
+    </div>
+    <div class="fines-ledger-summary">
+      <span>Tổng Phạt Nguội (${settlement.violations.length} lỗi)</span>
+      <strong class="danger-text">−${formatVND(settlement.totalColdFines)}</strong>
+    </div>
+    <div class="fines-ledger-summary net">
+      <span>Thực nhận</span>
+      <strong class="${netClass}">${netPrefix}${netAbs}</strong>
+    </div>
+    ${tagsHtml ? `<div class="fines-tag-list">${tagsHtml}</div>` : ''}
+  `;
+  container.classList.remove('hidden');
 }
 
 export class HudController {
@@ -78,8 +176,13 @@ export class HudController {
 
   private readonly screens: Record<GameScreen, HTMLElement>;
   private readonly damageVignette: HTMLElement;
+  private readonly cameraFlash: HTMLElement;
   private readonly menuAudioPill: HTMLElement;
   private readonly btnPause: HTMLButtonElement;
+  private readonly btnOpenShop: HTMLButtonElement;
+  private readonly menuCareerWalletValue: HTMLElement;
+  private readonly stageSelect: HTMLSelectElement;
+  private readonly shopModal: ShopModal;
 
   private readonly btnMute: HTMLButtonElement;
   private readonly iconVolOn: HTMLElement;
@@ -99,22 +202,27 @@ export class HudController {
   private readonly bikeCards: NodeListOf<HTMLButtonElement>;
   private readonly diffCards: NodeListOf<HTMLButtonElement>;
 
-  // In-game 3-zone HUD elements
+  // In-game HUD elements
   private readonly walletValue: HTMLElement;
   private readonly walletDelta: HTMLElement;
   private readonly comboBadge: HTMLElement;
+  private readonly finePill: HTMLElement;
   private readonly invulnBadge: HTMLElement;
   private readonly stageBadge: HTMLElement;
   private readonly stageName: HTMLElement;
   private readonly distanceText: HTMLElement;
-  private readonly progressFill: HTMLElement;
-  private readonly progressMarker: HTMLElement;
-  private readonly fromLabel: HTMLElement;
-  private readonly toLabel: HTMLElement;
+  private readonly speedLimitSign: HTMLElement;
+  private readonly speedLimitValue: HTMLElement;
+  private readonly rearviewMirror: HTMLElement;
+  private readonly rearAlert: HTMLElement;
+  private readonly minimapCanvas: HTMLCanvasElement;
+  private readonly minimapCtx: CanvasRenderingContext2D | null;
   private readonly toastStack: HTMLElement;
   private readonly hornHint: HTMLElement;
+  private readonly speedoCard: HTMLElement;
   private readonly speedValue: HTMLElement;
   private readonly speedFill: HTMLElement;
+  private readonly brakeBadge: HTMLElement;
 
   // Modal summary elements
   private readonly pausedStageDesc: HTMLElement;
@@ -127,29 +235,43 @@ export class HudController {
   private readonly clearBaseReward: HTMLElement;
   private readonly clearPerfectBonus: HTMLElement;
   private readonly clearWallet: HTMLElement;
+  private readonly clearFinesLedger: HTMLElement;
+  private readonly gameoverStamp: HTMLElement;
+  private readonly gameoverTitle: HTMLElement;
+  private readonly gameoverDesc: HTMLElement;
   private readonly gameoverStage: HTMLElement;
   private readonly gameoverProgress: HTMLElement;
   private readonly gameoverHits: HTMLElement;
+  private readonly gameoverFinesLedger: HTMLElement;
   private readonly victoryMeta: HTMLElement;
   private readonly victoryLastReward: HTMLElement;
   private readonly victoryHits: HTMLElement;
   private readonly victoryTime: HTMLElement;
   private readonly victoryWallet: HTMLElement;
+  private readonly victoryFinesLedger: HTMLElement;
 
+  private careerProfile: PlayerProfile = createDefaultProfile();
   private deltaTimerId: number | null = null;
   private damageTimerId: number | null = null;
+  private cameraFlashTimerId: number | null = null;
   private hornHintHidden = false;
   private pauseArmedId: string | null = null;
   private pauseArmTimerId: number | null = null;
 
-  // Dirty-check & throttle state (~14 Hz numeric DOM writes)
+  // Dirty-check & throttle state (~14 Hz numeric + minimap DOM writes)
   private lastNumericSyncTime = 0;
   private lastScreen: GameScreen | null = null;
   private lastSpeedText = '';
   private lastSpeedPct = -1;
   private lastDistanceText = '';
-  private lastProgressPct = -1;
   private lastWallet = -1;
+  private lastCareerWallet = -1;
+  private lastBraking = false;
+  private lastFineCount = -1;
+  private lastSpeedLimit = -1;
+  private lastOverspeed = false;
+  private lastRearThreatText = '';
+  private lastRearReckless = false;
   private lastHitsBadgeText = '';
   private lastInvulnText = '';
   private lastInvulnVariant = '';
@@ -168,8 +290,30 @@ export class HudController {
     };
 
     this.damageVignette = getRequiredEl('hud-damage-vignette');
+    this.cameraFlash = getRequiredEl('hud-camera-flash');
     this.menuAudioPill = getRequiredEl('menu-audio-pill');
     this.btnPause = getRequiredEl<HTMLButtonElement>('btn-pause');
+    this.btnOpenShop = getRequiredEl<HTMLButtonElement>('btn-open-shop');
+    this.menuCareerWalletValue = getRequiredEl('menu-career-wallet-value');
+    this.stageSelect = getRequiredEl<HTMLSelectElement>('select-stage');
+
+    this.shopModal = new ShopModal({
+      onSelectOwnedBike: (bikeId) => {
+        this.careerProfile = { ...this.careerProfile, selectedBikeId: bikeId };
+        this.setSelectedBike(bikeId);
+        this.callbacks.onSelectBike(bikeId);
+      },
+      onPurchaseBike: (bikeId, priceVnd) =>
+        this.callbacks.onPurchaseBike?.(bikeId, priceVnd) ?? false,
+      onTestRideBike: (bikeId) => {
+        this.setSelectedBike(bikeId);
+        this.callbacks.onTestRideBike?.(bikeId);
+      },
+      onClose: () => {
+        this.syncMenuAudioPillVisibility();
+        this.callbacks.onCloseShop?.();
+      }
+    });
 
     this.btnMute = getRequiredEl<HTMLButtonElement>('btn-mute');
     this.iconVolOn = getRequiredEl('icon-vol-on');
@@ -192,18 +336,23 @@ export class HudController {
     this.walletValue = getRequiredEl('hud-wallet-value');
     this.walletDelta = getRequiredEl('hud-wallet-delta');
     this.comboBadge = getRequiredEl('hud-combo-badge');
+    this.finePill = getRequiredEl('hud-fine-pill');
     this.invulnBadge = getRequiredEl('hud-invuln-badge');
     this.stageBadge = getRequiredEl('hud-stage-badge');
     this.stageName = getRequiredEl('hud-stage-name');
     this.distanceText = getRequiredEl('hud-distance-text');
-    this.progressFill = getRequiredEl('hud-progress-fill');
-    this.progressMarker = getRequiredEl('hud-progress-marker');
-    this.fromLabel = getRequiredEl('hud-from-label');
-    this.toLabel = getRequiredEl('hud-to-label');
+    this.speedLimitSign = getRequiredEl('hud-speed-limit');
+    this.speedLimitValue = getRequiredEl('hud-speed-limit-value');
+    this.rearviewMirror = getRequiredEl('hud-rearview-mirror');
+    this.rearAlert = getRequiredEl('hud-rear-alert');
+    this.minimapCanvas = getRequiredEl<HTMLCanvasElement>('minimap-canvas');
+    this.minimapCtx = this.minimapCanvas.getContext('2d');
     this.toastStack = getRequiredEl('hud-toast-stack');
     this.hornHint = getRequiredEl('hud-horn-hint');
+    this.speedoCard = getRequiredEl('hud-speedo-card');
     this.speedValue = getRequiredEl('hud-speed-value');
     this.speedFill = getRequiredEl('hud-speed-fill');
+    this.brakeBadge = getRequiredEl('hud-brake-badge');
 
     this.pausedStageDesc = getRequiredEl('paused-stage-desc');
     this.btnRestartPaused = getRequiredEl<HTMLButtonElement>('btn-restart-paused');
@@ -215,14 +364,20 @@ export class HudController {
     this.clearBaseReward = getRequiredEl('clear-base-reward');
     this.clearPerfectBonus = getRequiredEl('clear-perfect-bonus');
     this.clearWallet = getRequiredEl('clear-wallet');
+    this.clearFinesLedger = getRequiredEl('clear-fines-ledger');
+    this.gameoverStamp = getRequiredEl('gameover-stamp');
+    this.gameoverTitle = getRequiredEl('gameover-title');
+    this.gameoverDesc = getRequiredEl('gameover-desc');
     this.gameoverStage = getRequiredEl('gameover-stage');
     this.gameoverProgress = getRequiredEl('gameover-progress');
     this.gameoverHits = getRequiredEl('gameover-hits');
+    this.gameoverFinesLedger = getRequiredEl('gameover-fines-ledger');
     this.victoryMeta = getRequiredEl('victory-meta');
     this.victoryLastReward = getRequiredEl('victory-last-reward');
     this.victoryHits = getRequiredEl('victory-hits');
     this.victoryTime = getRequiredEl('victory-time');
     this.victoryWallet = getRequiredEl('victory-wallet');
+    this.victoryFinesLedger = getRequiredEl('victory-fines-ledger');
 
     this.populateBikeStats();
     this.bindEvents();
@@ -301,8 +456,19 @@ export class HudController {
       });
     });
 
+    this.stageSelect.addEventListener('change', () => {
+      const parsed = Number(this.stageSelect.value);
+      const valid = STAGES.find((s) => s.id === parsed)?.id ?? 1;
+      this.callbacks.onSelectStage?.(valid);
+      this.stageSelect.blur();
+    });
+
     getRequiredEl('btn-start').addEventListener('click', () => {
       this.callbacks.onStartGame();
+    });
+
+    this.btnOpenShop.addEventListener('click', () => {
+      this.setShopOpen(true);
     });
 
     this.btnPause.addEventListener('click', () => {
@@ -427,6 +593,35 @@ export class HudController {
     });
   }
 
+  public setCareerProfile(profile: PlayerProfile): void {
+    this.careerProfile = profile;
+    this.lastCareerWallet = profile.careerWallet;
+    this.menuCareerWalletValue.textContent = formatVND(profile.careerWallet);
+    this.shopModal.setProfile(profile);
+  }
+
+  public isShopOpen(): boolean {
+    return this.shopModal.isOpen();
+  }
+
+  private syncMenuAudioPillVisibility(): void {
+    const isPlayingOrPaused =
+      this.lastScreen === 'playing' || this.lastScreen === 'paused';
+    this.menuAudioPill.classList.toggle(
+      'hidden',
+      isPlayingOrPaused || this.shopModal.isOpen()
+    );
+  }
+
+  public setShopOpen(open: boolean): void {
+    const wasOpen = this.shopModal.isOpen();
+    this.shopModal.setOpen(open);
+    this.syncMenuAudioPillVisibility();
+    if (open && !wasOpen) {
+      this.callbacks.onOpenShop?.();
+    }
+  }
+
   public setSelectedBike(bikeId: BikeId): void {
     this.bikeCards.forEach((btn) => {
       const active = btn.dataset.bike === bikeId;
@@ -435,6 +630,10 @@ export class HudController {
     });
     this.showroomBikeName.textContent = BIKES[bikeId].name;
     this.showroomBikeDesc.textContent = BIKES[bikeId].tagline;
+    if (this.careerProfile.selectedBikeId !== bikeId) {
+      this.careerProfile = { ...this.careerProfile, selectedBikeId: bikeId };
+      this.shopModal.setProfile(this.careerProfile);
+    }
   }
 
   public setSelectedDifficulty(difficultyId: DifficultyId): void {
@@ -443,6 +642,13 @@ export class HudController {
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', String(active));
     });
+  }
+
+  public setSelectedStage(stageId: StageId): void {
+    const targetValue = String(stageId);
+    if (this.stageSelect.value !== targetValue) {
+      this.stageSelect.value = targetValue;
+    }
   }
 
   public syncAudioUI(muted: boolean, volume: number): void {
@@ -462,10 +668,36 @@ export class HudController {
     this.pauseIconVolOff.classList.toggle('hidden', !isMuted);
   }
 
+  public triggerCameraFlash(): void {
+    this.cameraFlash.classList.add('active');
+    void this.cameraFlash.offsetWidth;
+    if (this.cameraFlashTimerId !== null) {
+      window.clearTimeout(this.cameraFlashTimerId);
+    }
+    this.cameraFlashTimerId = window.setTimeout(() => {
+      this.cameraFlash.classList.remove('active');
+      this.cameraFlashTimerId = null;
+    }, 60);
+  }
+
+  public showViolationToast(violation: RecordedViolation): void {
+    while (this.toastStack.children.length >= 2) {
+      this.toastStack.firstElementChild?.remove();
+    }
+
+    const toast = document.createElement('div');
+    toast.className = 'violation-toast';
+    toast.textContent = `📷 Phạt nguội: ${violation.label} (+${formatVND(violation.amount)} — trừ tại đích)`;
+    this.toastStack.appendChild(toast);
+
+    window.setTimeout(() => {
+      toast.remove();
+    }, 2400);
+  }
+
   public showPenaltyToast(obstacleType: ObstacleTypeId, penalty: number): void {
     const shortName = OBSTACLE_TOAST_NAME[obstacleType] ?? OBSTACLE_TYPES[obstacleType].label;
 
-    // Limit queue to 2 simultaneous top-band toasts
     while (this.toastStack.children.length >= 2) {
       this.toastStack.firstElementChild?.remove();
     }
@@ -479,10 +711,8 @@ export class HudController {
       toast.remove();
     }, 1800);
 
-    // Trigger floating wallet deduction delta & red edge vignette pulse
     this.walletDelta.textContent = `−${formatVND(penalty)}`;
     this.walletDelta.classList.remove('hidden');
-    // Restart animation cleanly
     void this.walletDelta.offsetWidth;
     this.walletValue.classList.add('hit-flash');
 
@@ -506,18 +736,235 @@ export class HudController {
     this.walletDelta.classList.add('hidden');
     this.walletValue.classList.remove('hit-flash');
     this.damageVignette.classList.remove('active');
+    this.cameraFlash.classList.remove('active');
+  }
+
+  private drawGpsMinimap(
+    stageId: StageId,
+    distance: number,
+    stageLength: number,
+    roadWidth: number,
+    lateralOffset: number,
+    isBraking: boolean,
+    features: StageRouteFeatures,
+    elapsedTime: number
+  ): void {
+    const ctx = this.minimapCtx;
+    if (!ctx) return;
+
+    const w = this.minimapCanvas.width;
+    const h = this.minimapCanvas.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Dark map surface
+    ctx.fillStyle = '#121a21';
+    ctx.fillRect(0, 0, w, h);
+
+    // Subtle city block grid lines
+    ctx.strokeStyle = 'rgba(124, 226, 228, 0.08)';
+    ctx.lineWidth = 1;
+    const gridSpacing = 22;
+    const scrollPx = (distance * 1.1) % gridSpacing;
+    for (let y = scrollPx; y < h; y += gridSpacing) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+    for (let x = 22; x < w; x += gridSpacing) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+
+    const lookAheadMeters = 320;
+    const lookBehindMeters = 32;
+    const playerY = h - 28;
+    const topY = 14;
+    const mapSpanY = playerY - topY;
+    const baseRoadX = getRoadCenterX(stageId, distance);
+    const scaleX = 2.0;
+
+    const toCanvasPoint = (d: number): { x: number; y: number } => {
+      const clampedD = Math.max(0, Math.min(stageLength, d));
+      const relD = clampedD - distance;
+      const xOffset = (getRoadCenterX(stageId, clampedD) - baseRoadX) * scaleX;
+      const x = Math.max(16, Math.min(w - 16, w * 0.5 + xOffset));
+      const y = playerY - (relD / lookAheadMeters) * mapSpanY;
+      return { x, y };
+    };
+
+    const startD = Math.max(0, distance - lookBehindMeters);
+    const endD = Math.min(stageLength, distance + lookAheadMeters);
+    const steps = 22;
+
+    // Road casing
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const d = startD + ((endD - startD) * i) / steps;
+      const pt = toCanvasPoint(d);
+      if (i === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.strokeStyle = 'rgba(217, 164, 65, 0.42)';
+    ctx.lineWidth = 18;
+    ctx.stroke();
+
+    // Inner road ribbon
+    ctx.strokeStyle = '#253340';
+    ctx.lineWidth = 13;
+    ctx.stroke();
+
+    // Upcoming intersection cross-streets & glowing traffic-light indicator (within 320m)
+    for (const zone of features.intersections) {
+      if (zone.distance < startD || zone.distance > endD) continue;
+      const pt = toCanvasPoint(zone.distance);
+      ctx.fillStyle = '#253340';
+      ctx.fillRect(10, pt.y - 4, w - 20, 8);
+      ctx.strokeStyle = 'rgba(246, 238, 220, 0.28)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(10, pt.y - 4);
+      ctx.lineTo(w - 10, pt.y - 4);
+      ctx.moveTo(10, pt.y + 4);
+      ctx.lineTo(w - 10, pt.y + 4);
+      ctx.stroke();
+
+      const light = getTrafficLightState(zone, elapsedTime);
+      const lightGlow =
+        light === 'red'
+          ? 'rgba(255, 90, 71, 0.42)'
+          : light === 'yellow'
+            ? 'rgba(243, 190, 89, 0.42)'
+            : 'rgba(76, 166, 107, 0.42)';
+      const lightColor =
+        light === 'red' ? '#ff5a47' : light === 'yellow' ? '#f3be59' : '#57d484';
+
+      ctx.fillStyle = lightGlow;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = lightColor;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Active GPS route path ahead of player
+    ctx.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const d = distance + ((endD - distance) * i) / steps;
+      const pt = toCanvasPoint(d);
+      if (i === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.strokeStyle = '#48c9cb';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // Center dashed lane guide
+    ctx.save();
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = 'rgba(246, 238, 220, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    // Upcoming Speed Camera Phạt Nguội indicator within 320m ahead
+    for (const cam of features.cameras) {
+      if (cam.distance < distance - 5 || cam.distance > endD) continue;
+      const camPt = toCanvasPoint(cam.distance);
+      const badgeX = Math.min(w - 11, camPt.x + 14);
+      const badgeY = camPt.y;
+
+      ctx.fillStyle = 'rgba(217, 78, 59, 0.92)';
+      ctx.beginPath();
+      ctx.arc(badgeX, badgeY, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff6f2';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      // Tiny camera lens icon inside warning dot
+      ctx.fillStyle = '#fff6f2';
+      ctx.fillRect(badgeX - 3.2, badgeY - 2.2, 6.4, 4.4);
+      ctx.fillStyle = '#1b1410';
+      ctx.beginPath();
+      ctx.arc(badgeX, badgeY, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Destination flag marker (on-route when close, or top-edge beacon)
+    if (endD >= stageLength - 1) {
+      const goalPt = toCanvasPoint(stageLength);
+      ctx.fillStyle = '#4ca66b';
+      ctx.beginPath();
+      ctx.arc(goalPt.x, goalPt.y, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#f6eedc';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = '#f6eedc';
+      ctx.fillRect(goalPt.x - 1, goalPt.y - 10, 2, 10);
+      ctx.fillStyle = '#e8a838';
+      ctx.fillRect(goalPt.x + 1, goalPt.y - 10, 7, 5);
+    } else {
+      const topPt = toCanvasPoint(endD);
+      ctx.fillStyle = '#e8a838';
+      ctx.beginPath();
+      ctx.arc(topPt.x, Math.max(8, topPt.y), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Shipper bike pin (clamped inside ribbon width)
+    const halfRoad = Math.max(3, roadWidth * 0.5);
+    const normLateral = Math.max(-1, Math.min(1, lateralOffset / halfRoad));
+    const pinX = w * 0.5 + normLateral * 4.5;
+    const pinY = playerY;
+
+    ctx.fillStyle = isBraking ? 'rgba(217, 78, 59, 0.35)' : 'rgba(232, 168, 56, 0.3)';
+    ctx.beginPath();
+    ctx.arc(pinX, pinY, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = isBraking ? '#ff6b57' : '#e8a838';
+    ctx.strokeStyle = '#fff8e8';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(pinX, pinY - 7);
+    ctx.lineTo(pinX + 5.5, pinY + 5);
+    ctx.lineTo(pinX, pinY + 2.2);
+    ctx.lineTo(pinX - 5.5, pinY + 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Bottom progress strip inside phone display
+    const pct = stageLength > 0 ? Math.max(0, Math.min(1, distance / stageLength)) : 0;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.fillRect(8, h - 7, w - 16, 3);
+    ctx.fillStyle = '#e8a838';
+    ctx.fillRect(8, h - 7, Math.max(4, (w - 16) * pct), 3);
   }
 
   private animateStageClearNumbers(
     baseReward: number,
     newWallet: number,
     perfectBonus: number,
-    hits: number
+    hits: number,
+    prevWalletOverride?: number
   ): void {
     if (this.clearAnimRafId !== null) {
       window.cancelAnimationFrame(this.clearAnimRafId);
     }
-    const prevWallet = Math.max(0, newWallet - baseReward - perfectBonus);
+    const prevWallet =
+      prevWalletOverride ?? Math.max(0, newWallet - baseReward - perfectBonus);
     const startTime = performance.now();
     const duration = 450;
 
@@ -552,6 +999,19 @@ export class HudController {
     const screenChanged = this.lastScreen !== state.screen;
     this.lastScreen = state.screen;
 
+    if (
+      view.careerWallet !== undefined &&
+      view.careerWallet !== this.lastCareerWallet
+    ) {
+      this.setCareerProfile({
+        ...this.careerProfile,
+        careerWallet: view.careerWallet,
+        totalDeliveries:
+          view.totalDeliveries ?? this.careerProfile.totalDeliveries,
+        selectedBikeId: state.bikeId
+      });
+    }
+
     if (screenChanged) {
       (Object.keys(this.screens) as GameScreen[]).forEach((key) => {
         const show =
@@ -562,14 +1022,17 @@ export class HudController {
 
       const isPlayingOrPaused = state.screen === 'playing' || state.screen === 'paused';
       this.btnPause.classList.toggle('hidden', !isPlayingOrPaused);
-      // Audio pill lives on Menu only; during gameplay audio controls live inside Pause Modal
-      this.menuAudioPill.classList.toggle('hidden', isPlayingOrPaused);
+
+      if (state.screen !== 'menu' && this.isShopOpen()) {
+        this.setShopOpen(false);
+      }
+      this.syncMenuAudioPillVisibility();
 
       if (state.screen !== 'paused') {
         this.resetPauseConfirmations();
       }
       if (state.screen === 'playing') {
-        this.lastNumericSyncTime = 0; // force immediate HUD refresh on enter
+        this.lastNumericSyncTime = 0;
       }
     }
 
@@ -579,7 +1042,10 @@ export class HudController {
         this.hornHint.classList.remove('hidden');
         this.setSelectedBike(state.bikeId);
         this.setSelectedDifficulty(state.difficultyId);
+        this.setSelectedStage(state.stageId);
         this.hidePenaltyToast();
+      } else {
+        this.setSelectedStage(state.stageId);
       }
       return;
     }
@@ -591,11 +1057,72 @@ export class HudController {
       this.hornHint.classList.toggle('hidden', shouldHideHorn);
     }
 
+    // Brake indicator badge
+    const braking = Boolean(view.isBraking) && state.screen === 'playing';
+    if (braking !== this.lastBraking || screenChanged) {
+      this.lastBraking = braking;
+      this.brakeBadge.classList.toggle('hidden', !braking);
+      this.speedoCard.classList.toggle('braking', braking);
+    }
+
+    // Speed limit sign & overspeed warning
+    const limitKmh = view.speedLimitKmh ?? stage.speedLimitKmh;
+    if (limitKmh !== this.lastSpeedLimit || screenChanged) {
+      this.lastSpeedLimit = limitKmh;
+      this.speedLimitValue.textContent = String(limitKmh);
+    }
+    const isOverspeed = state.screen === 'playing' && displayKmh > limitKmh;
+    if (isOverspeed !== this.lastOverspeed || screenChanged) {
+      this.lastOverspeed = isOverspeed;
+      this.speedLimitSign.classList.toggle('overspeed', isOverspeed);
+      this.speedoCard.classList.toggle('overspeed', isOverspeed);
+    }
+
+    // Rearview mirror threat indicator
+    const threat = view.rearThreat;
+    const rearActive = state.screen === 'playing' && Boolean(threat?.active);
+    const rearReckless = rearActive && Boolean(threat?.isReckless);
+    const rearText = rearActive
+      ? `⚠ XE SAU ${Math.max(1, Math.round(threat?.distanceMeters ?? 0))}m`
+      : '';
+    if (
+      rearText !== this.lastRearThreatText ||
+      rearReckless !== this.lastRearReckless ||
+      screenChanged
+    ) {
+      this.lastRearThreatText = rearText;
+      this.lastRearReckless = rearReckless;
+      this.rearviewMirror.classList.toggle('threat', rearActive);
+      this.rearAlert.classList.toggle('hidden', !rearActive);
+      this.rearAlert.classList.toggle('reckless', rearReckless);
+      if (rearText) {
+        this.rearAlert.textContent = rearText;
+      }
+    }
+
     // Wallet & semantic hit badge
     if (state.wallet !== this.lastWallet || screenChanged) {
       this.lastWallet = state.wallet;
       this.walletValue.textContent = formatVND(state.wallet);
       this.walletValue.classList.toggle('low', state.wallet <= diff.startingWallet * 0.28);
+    }
+
+    // Cold fine counter pill
+    const fineCount = view.pendingFineCount ?? 0;
+    const fineTotal = view.pendingFineTotal ?? 0;
+    if (fineCount !== this.lastFineCount || screenChanged) {
+      this.lastFineCount = fineCount;
+      this.finePill.textContent = `📷 ${fineCount} lỗi`;
+      this.finePill.title =
+        fineCount > 0
+          ? `Tạm ghi ${fineCount} lỗi phạt nguội (${formatVND(fineTotal)}) — trừ tại đích`
+          : 'Chưa có lỗi phạt nguội';
+      this.finePill.classList.remove('has-fines', 'heavy-fines');
+      if (fineCount === 1) {
+        this.finePill.classList.add('has-fines');
+      } else if (fineCount >= 2) {
+        this.finePill.classList.add('heavy-fines');
+      }
     }
 
     const comboText =
@@ -665,31 +1192,39 @@ export class HudController {
       }
     }
 
-    // Throttle rapidly updating distance/speed DOM mutations to ~14 Hz
+    // Throttle rapidly updating distance/speed/minimap mutations to ~14 Hz
     const now = performance.now();
     if (screenChanged || now - this.lastNumericSyncTime >= 68) {
       this.lastNumericSyncTime = now;
 
-      const fullStageTitle = `${stage.name.replace(/^Bài\s+\d+:\s*/i, '')} · ${stage.laneCount} làn`;
-      if (this.stageName.textContent !== fullStageTitle) {
-        this.stageName.textContent = fullStageTitle;
+      const stageBadgeText = `Chặng ${stage.id}/${STAGES.length}`;
+      if (this.stageBadge.textContent !== stageBadgeText) {
+        this.stageBadge.textContent = stageBadgeText;
       }
-      this.stageBadge.textContent = `Bài ${stage.id}/${STAGES.length}`;
-      this.fromLabel.textContent = stage.fromLabel;
-      this.toLabel.textContent = stage.toLabel;
+      const laneTag = `${stage.laneCount} làn`;
+      if (this.stageName.textContent !== laneTag) {
+        this.stageName.textContent = laneTag;
+      }
 
-      const distStr = `${formatMeters(state.distance)} / ${formatMeters(stage.length)} m`;
+      const remaining = Math.max(0, stage.length - state.distance);
+      const distStr = `${formatRemainingDistance(remaining)} · Đích`;
       if (distStr !== this.lastDistanceText) {
         this.lastDistanceText = distStr;
         this.distanceText.textContent = distStr;
       }
 
-      const pct = Math.max(0, Math.min(100, Math.round(state.progress * 1000) / 10));
-      if (pct !== this.lastProgressPct) {
-        this.lastProgressPct = pct;
-        this.progressFill.style.width = `${pct.toFixed(1)}%`;
-        this.progressMarker.style.left = `${(2 + pct * 0.96).toFixed(1)}%`;
-      }
+      const features = view.routeFeatures ?? getStageRouteFeatures(stage.id);
+      const elapsedTime = view.elapsedStageTime ?? state.elapsedStageTime;
+      this.drawGpsMinimap(
+        stage.id,
+        state.distance,
+        stage.length,
+        stage.roadWidth,
+        view.lateralOffset ?? 0,
+        braking,
+        features,
+        elapsedTime
+      );
 
       const kmhStr = String(Math.max(0, Math.round(displayKmh)));
       if (kmhStr !== this.lastSpeedText) {
@@ -708,48 +1243,88 @@ export class HudController {
     }
 
     if (screenChanged && state.screen === 'paused') {
-      this.pausedStageDesc.textContent = `Đang giao hàng tại Bài ${stage.id}/${STAGES.length} — ${stage.name.replace(/^Bài\s+\d+:\s*/i, '')}`;
+      this.pausedStageDesc.textContent = `Đang giao hàng tại Chặng ${stage.id}/${STAGES.length} (${stage.codeLabel} · ${stage.laneCount} làn) — ${stage.shortName}`;
     }
 
     if (screenChanged && state.screen === 'stage_clear') {
       const hits = state.hitsInStage;
       const base = state.lastStageReward || diff.stageReward;
       const bonus = state.lastPerfectBonus;
-      const stars = hits === 0 ? 3 : hits <= 2 ? 2 : 1;
+      const settlement = state.lastColdFineSettlement;
+      const fineCountClear = settlement?.violations.length ?? 0;
+      const stars = hits === 0 && fineCountClear === 0 ? 3 : hits <= 2 ? 2 : 1;
 
       this.clearStars.innerHTML = [1, 2, 3].map((n) => createStarSvg(n <= stars)).join('');
-      this.clearRankBadge.className = `retro-stamp ${hits === 0 ? 'success' : 'warning'}`;
+      this.clearRankBadge.className = `retro-stamp ${
+        hits === 0 && fineCountClear === 0 ? 'success' : 'warning'
+      }`;
       this.clearRankBadge.textContent =
-        hits === 0 ? 'GIAO SẠCH KHÔNG LỖI' : 'GIAO HÀNG ĐÚNG HẸN';
-      this.clearTitle.textContent = `QUA BÀI ${stage.id}/${STAGES.length}!`;
-      this.clearSubtitle.textContent = `Đã tới ${stage.toLabel}`;
-      this.animateStageClearNumbers(base, state.wallet, bonus, hits);
+        hits === 0 && fineCountClear === 0
+          ? 'GIAO SẠCH KHÔNG LỖI'
+          : fineCountClear > 0
+            ? `ĐÃ TRỪ ${fineCountClear} LỖI PHẠT NGUỘI`
+            : 'GIAO HÀNG ĐÚNG HẸN';
+      this.clearTitle.textContent = `QUA CHẶNG ${stage.id}/${STAGES.length}!`;
+      this.clearSubtitle.textContent = `Bài ${stage.codeLabel} · Đã tới ${stage.toLabel}`;
+      this.animateStageClearNumbers(
+        base,
+        state.wallet,
+        bonus,
+        hits,
+        settlement?.currentWallet
+      );
+      renderColdFinesLedger(this.clearFinesLedger, settlement);
     }
 
     if (screenChanged && state.screen === 'game_over') {
       const pct = Math.max(0, Math.min(100, Math.round(state.progress * 100)));
+      const settlement = state.lastColdFineSettlement;
+      if (settlement?.bankruptByColdFines) {
+        this.gameoverStamp.textContent = 'BIÊN BẢN PHẠT NGUỘI';
+        this.gameoverTitle.textContent = 'CHÁY VÍ VÌ PHẠT NGUỘI!';
+        this.gameoverDesc.textContent = `Tổng phạt nguội ${formatVND(settlement.totalColdFines)} (${settlement.violations.length} lỗi) đã trừ cạn ví tại đích ${stage.toLabel}.`;
+      } else {
+        this.gameoverStamp.textContent = 'VÍ TIỀN ĐÃ CẠN';
+        this.gameoverTitle.textContent = 'HẾT TIỀN VÍ!';
+        this.gameoverDesc.textContent =
+          'Ví còn 0 đ sau quá nhiều va chạm trên phố. Hãy bình tĩnh luồn lách lại nhé!';
+      }
+
       const lastLabel = state.lastObstacleHit
         ? OBSTACLE_TYPES[state.lastObstacleHit].label
         : 'vật cản trên phố';
-      this.gameoverStage.textContent = `Bài ${stage.id}/${STAGES.length} (${stage.shortName})`;
+      this.gameoverStage.textContent = `Chặng ${stage.id}/${STAGES.length} (${stage.shortName})`;
       this.gameoverProgress.textContent = `${pct}%`;
-      this.gameoverHits.textContent = `${state.totalHits} lần (cú cuối: ${lastLabel})`;
+      this.gameoverHits.textContent = settlement?.bankruptByColdFines
+        ? state.totalHits === 0
+          ? '0 lần (Cháy ví vì Phạt Nguội)'
+          : `${state.totalHits} lần (Cháy ví vì Phạt Nguội)`
+        : `${state.totalHits} lần (cú cuối: ${lastLabel})`;
+      renderColdFinesLedger(this.gameoverFinesLedger, settlement);
     }
 
     if (screenChanged && state.screen === 'victory') {
-      const totalStage3 = (state.lastStageReward || diff.stageReward) + state.lastPerfectBonus;
+      const settlement = state.lastColdFineSettlement;
+      const totalStageLast =
+        (state.lastStageReward || diff.stageReward) + state.lastPerfectBonus;
+      const netLast = settlement ? settlement.netChange : totalStageLast;
+      const netPrefix = netLast >= 0 ? '+' : '−';
+
       this.victoryMeta.textContent = `${bike.name} · ${diff.label}`;
-      this.victoryLastReward.textContent = `+${formatVND(totalStage3)}`;
+      this.victoryLastReward.textContent = `${netPrefix}${formatVND(Math.abs(netLast))}`;
       this.victoryHits.textContent = `${state.totalHits} lần`;
       this.victoryTime.textContent = formatDuration(state.totalRunTime);
       this.victoryWallet.textContent = formatVND(state.wallet);
+      renderColdFinesLedger(this.victoryFinesLedger, settlement);
     }
   }
 
   public dispose(): void {
     if (this.deltaTimerId !== null) window.clearTimeout(this.deltaTimerId);
     if (this.damageTimerId !== null) window.clearTimeout(this.damageTimerId);
+    if (this.cameraFlashTimerId !== null) window.clearTimeout(this.cameraFlashTimerId);
     if (this.clearAnimRafId !== null) window.cancelAnimationFrame(this.clearAnimRafId);
+    this.shopModal.dispose();
     this.resetPauseConfirmations();
   }
 }

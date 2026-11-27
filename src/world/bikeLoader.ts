@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -6,11 +8,17 @@ import {
   applyShipperOutfit,
   bindRiderRig,
   buildRiderRig,
-  patchOutfitMaterial
+  patchOutfitMaterial,
+  type RiderRig
 } from './riderRig.ts';
 import { seatedPose } from '../core/riderPose.ts';
 import { HANOI_PALETTE } from '../config/artPalette.ts';
-import { BIKES, PLAYER_HALF_L, type BikeId } from '../config/gameConfig.ts';
+import {
+  BIKES,
+  DRACO_DECODER_PATH,
+  PLAYER_HALF_L,
+  type BikeId
+} from '../config/gameConfig.ts';
 
 const DRIVER_MODEL_PATH = '/assets/models/driver.glb';
 const DRIVER_HIP_RAW_Y = -0.09;
@@ -64,15 +72,88 @@ const DRIVER_PROFILES: Record<BikeId, DriverPoseProfile> = {
     platePos: [0, 0.42, 0.93],
     plateTilt: -0.3,
     plateNumber: ['30-MĐ1', '579.39']
+  },
+  suzuki_rgv: {
+    scale: 1.32,
+    seatY: 0.8,
+    seatZ: 0.14,
+    grip: [0.27, 0.92, -0.34],
+    foot: [0.18, 0.3, 0.05],
+    boxCenterY: 0.88,
+    boxZ: 0.76,
+    strutBottomY: 0.66,
+    phonePos: [0.09, 1.02, -0.34],
+    platePos: [0, 0.48, 0.94],
+    plateTilt: -0.18,
+    plateNumber: ['29-S1', '120.98']
+  },
+  suzuki_gsxs: {
+    scale: 1.32,
+    seatY: 0.83,
+    seatZ: 0.14,
+    grip: [0.31, 0.94, -0.35],
+    foot: [0.19, 0.34, 0.12],
+    boxCenterY: 0.94,
+    boxZ: 0.74,
+    strutBottomY: 0.72,
+    phonePos: [0.09, 1.03, -0.36],
+    platePos: [0, 0.56, 0.96],
+    plateTilt: -0.22,
+    plateNumber: ['29-A1', '999.68']
   }
 };
 
 const GRIP_PALM_LIFT = 0.025;
 
-const gltfLoader = new GLTFLoader();
+let sharedBikeDracoLoader: DRACOLoader | null = null;
+let sharedBikeGltfLoader: GLTFLoader | null = null;
+
+function getSharedBikeGltfLoader(): GLTFLoader {
+  if (!sharedBikeGltfLoader) {
+    sharedBikeDracoLoader = new DRACOLoader();
+    sharedBikeDracoLoader.setDecoderPath(DRACO_DECODER_PATH);
+    sharedBikeGltfLoader = new GLTFLoader();
+    sharedBikeGltfLoader.setDRACOLoader(sharedBikeDracoLoader);
+    sharedBikeGltfLoader.setMeshoptDecoder(MeshoptDecoder);
+  }
+  return sharedBikeGltfLoader;
+}
+
+/** Disposes shared Draco web workers after bike GLB loading completes. */
+export function disposeBikeLoaderWorkers(): void {
+  if (sharedBikeDracoLoader) {
+    sharedBikeDracoLoader.dispose();
+    sharedBikeDracoLoader = null;
+  }
+  sharedBikeGltfLoader = null;
+}
+
 const bikeTemplateCache = new Map<BikeId, Promise<THREE.Group>>();
 const standingDriverTemplateCache = new Map<BikeId, Promise<THREE.Group | null>>();
 let rawDriverGltfPromise: Promise<THREE.Group | null> | null = null;
+
+const BRAKE_LIGHT_POS: Record<BikeId, [number, number, number]> = {
+  honda: [0, 0.65, 0.94],
+  vinfast: [0, 0.62, 0.91],
+  suzuki_rgv: [0, 0.64, 0.92],
+  suzuki_gsxs: [0, 0.78, 0.92]
+};
+
+const isolatedBrakeMeshes = new WeakSet<THREE.Mesh>();
+const cachedSeatedRigMap = new WeakMap<THREE.Object3D, RiderRig | null>();
+const savedSeatedLegPoses = new WeakMap<
+  THREE.Object3D,
+  { thighL: THREE.Quaternion; shinL: THREE.Quaternion }
+>();
+const stoppedPoseState = new WeakMap<THREE.Object3D, boolean>();
+
+export interface BrakeLightHandle {
+  group: THREE.Group;
+  lensMaterial: THREE.MeshStandardMaterial;
+  glowMesh: THREE.Mesh;
+  glowMaterial: THREE.MeshBasicMaterial;
+  setBraking: (braking: boolean) => void;
+}
 
 export interface BikeRigHandles {
   root: THREE.Group;
@@ -80,6 +161,41 @@ export interface BikeRigHandles {
   seatedRider: THREE.Group | null;
   standingRider: THREE.Group | null;
   deliveryBox: THREE.Group | null;
+  brakeLight: BrakeLightHandle | null;
+}
+
+function bindBrakeLightHandle(root: THREE.Object3D): BrakeLightHandle | null {
+  const group = root.getObjectByName('BrakeLight') as THREE.Group | undefined;
+  if (!group) return null;
+  const lensMesh = group.getObjectByName('BrakeLens') as THREE.Mesh | undefined;
+  const glowMesh = group.getObjectByName('BrakeGlow') as THREE.Mesh | undefined;
+  if (!lensMesh || !glowMesh) return null;
+
+  if (!isolatedBrakeMeshes.has(lensMesh)) {
+    lensMesh.material = (lensMesh.material as THREE.MeshStandardMaterial).clone();
+    isolatedBrakeMeshes.add(lensMesh);
+  }
+  if (!isolatedBrakeMeshes.has(glowMesh)) {
+    glowMesh.material = (glowMesh.material as THREE.MeshBasicMaterial).clone();
+    isolatedBrakeMeshes.add(glowMesh);
+  }
+
+  const lensMaterial = lensMesh.material as THREE.MeshStandardMaterial;
+  const glowMaterial = glowMesh.material as THREE.MeshBasicMaterial;
+
+  const setBraking = (braking: boolean) => {
+    lensMaterial.emissiveIntensity = braking ? 3.4 : 0.45;
+    glowMesh.visible = braking;
+    glowMaterial.opacity = braking ? 0.72 : 0;
+  };
+
+  return {
+    group,
+    lensMaterial,
+    glowMesh,
+    glowMaterial,
+    setBraking
+  };
 }
 
 export function extractBikeRig(root: THREE.Object3D): BikeRigHandles {
@@ -92,13 +208,80 @@ export function extractBikeRig(root: THREE.Object3D): BikeRigHandles {
     (root.getObjectByName('StandingRider') as THREE.Group | undefined) ?? null;
   const deliveryBox =
     (root.getObjectByName('DeliveryBox') as THREE.Group | undefined) ?? null;
-  return { root: r, bikeAssembly, seatedRider, standingRider, deliveryBox };
+  const brakeLight = bindBrakeLightHandle(root);
+  return { root: r, bikeAssembly, seatedRider, standingRider, deliveryBox, brakeLight };
 }
 
-let cachedBoxLabelTexture: THREE.CanvasTexture | null = null;
+export function setBikeBrakeLight(
+  handles: BikeRigHandles | null,
+  braking: boolean
+): void {
+  handles?.brakeLight?.setBraking(braking);
+}
 
-function getDeliveryBoxLabelTexture(): THREE.CanvasTexture {
+const STOP_POSE_AXIS_X = new THREE.Vector3(1, 0, 0);
+const STOP_POSE_AXIS_Z = new THREE.Vector3(0, 0, 1);
+const _stopQuatA = new THREE.Quaternion();
+const _stopQuatB = new THREE.Quaternion();
+
+export function setBikeStoppedPose(
+  handles: BikeRigHandles | null,
+  stopped: boolean
+): void {
+  if (!handles) return;
+  const wasStopped = stoppedPoseState.get(handles.root) ?? false;
+  if (wasStopped === stopped) return;
+  stoppedPoseState.set(handles.root, stopped);
+
+  const rider = handles.seatedRider;
+  let rig = rider ? cachedSeatedRigMap.get(rider) : undefined;
+  if (rider && rig === undefined) {
+    rig = bindRiderRig(rider);
+    cachedSeatedRigMap.set(rider, rig);
+  }
+
+  if (stopped) {
+    handles.bikeAssembly.rotation.z = 0.032;
+    if (rider && rig) {
+      if (!savedSeatedLegPoses.has(rider)) {
+        savedSeatedLegPoses.set(rider, {
+          thighL: rig.bones.thighL.quaternion.clone(),
+          shinL: rig.bones.shinL.quaternion.clone()
+        });
+      }
+      // Drop left foot down and slightly outward to prop the bike at 0 km/h
+      _stopQuatA.setFromAxisAngle(STOP_POSE_AXIS_Z, -0.34);
+      _stopQuatB.setFromAxisAngle(STOP_POSE_AXIS_X, 0.36);
+      rig.bones.thighL.quaternion.copy(_stopQuatA).multiply(_stopQuatB);
+      rig.bones.shinL.quaternion.setFromAxisAngle(STOP_POSE_AXIS_X, -0.38);
+    }
+  } else {
+    handles.bikeAssembly.rotation.z = 0;
+    if (rider && rig) {
+      const saved = savedSeatedLegPoses.get(rider);
+      if (saved) {
+        rig.bones.thighL.quaternion.copy(saved.thighL);
+        rig.bones.shinL.quaternion.copy(saved.shinL);
+      }
+    }
+  }
+}
+
+let cachedBoxLabelTexture: THREE.Texture | null = null;
+
+function createHeadlessFallbackTexture(r: number, g: number, b: number): THREE.DataTexture {
+  const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1, THREE.RGBAFormat);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function getDeliveryBoxLabelTexture(): THREE.Texture {
   if (cachedBoxLabelTexture) return cachedBoxLabelTexture;
+  if (typeof document === 'undefined') {
+    cachedBoxLabelTexture = createHeadlessFallbackTexture(22, 128, 75);
+    return cachedBoxLabelTexture;
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = 256;
@@ -114,13 +297,13 @@ function getDeliveryBoxLabelTexture(): THREE.CanvasTexture {
     ctx.strokeRect(8, 8, 240, 112);
 
     ctx.fillStyle = '#f6eedc';
-    ctx.font = 'bold 28px "Segoe UI", Roboto, sans-serif';
+    ctx.font = 'bold 28px "Be Vietnam Pro", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('HANOI', 128, 46);
 
     ctx.fillStyle = '#ffcd00';
-    ctx.font = 'bold 24px monospace';
+    ctx.font = 'bold 24px "Be Vietnam Pro", sans-serif';
     ctx.fillText('SHIPPER', 128, 84);
   }
 
@@ -424,7 +607,7 @@ function normalizeStandingDriverScene(rawDriver: THREE.Group, bikeId: BikeId): T
 
 async function fetchRawDriverGltf(): Promise<THREE.Group | null> {
   try {
-    const gltf = await gltfLoader.loadAsync(DRIVER_MODEL_PATH);
+    const gltf = await getSharedBikeGltfLoader().loadAsync(DRIVER_MODEL_PATH);
     return gltf.scene;
   } catch (err) {
     console.warn('[bikeLoader] Could not load driver.glb, using fallback rider:', err);
@@ -560,12 +743,17 @@ function createDeliveryBox(bikeId: BikeId): THREE.Group {
   return boxGroup;
 }
 
-const plateTextureCache = new Map<string, THREE.CanvasTexture>();
+const plateTextureCache = new Map<string, THREE.Texture>();
 
-function getPlateTexture(lines: [string, string]): THREE.CanvasTexture {
+function getPlateTexture(lines: [string, string]): THREE.Texture {
   const key = lines.join('|');
   const cached = plateTextureCache.get(key);
   if (cached) return cached;
+  if (typeof document === 'undefined') {
+    const tex = createHeadlessFallbackTexture(244, 241, 232);
+    plateTextureCache.set(key, tex);
+    return tex;
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 192;
   canvas.height = 144;
@@ -579,7 +767,7 @@ function getPlateTexture(lines: [string, string]): THREE.CanvasTexture {
     ctx.fillStyle = '#1b1b1b';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = 'bold 50px "Arial Narrow", Arial, sans-serif';
+    ctx.font = 'bold 50px "Be Vietnam Pro", sans-serif';
     ctx.fillText(lines[0], 96, 44);
     ctx.fillText(lines[1], 96, 104);
   }
@@ -589,11 +777,15 @@ function getPlateTexture(lines: [string, string]): THREE.CanvasTexture {
   return tex;
 }
 
-let phoneScreenTexture: THREE.CanvasTexture | null = null;
+let phoneScreenTexture: THREE.Texture | null = null;
 
 /** Little delivery-app map on the phone screen: route line from A to B. */
-function getPhoneScreenTexture(): THREE.CanvasTexture {
+function getPhoneScreenTexture(): THREE.Texture {
   if (phoneScreenTexture) return phoneScreenTexture;
+  if (typeof document === 'undefined') {
+    phoneScreenTexture = createHeadlessFallbackTexture(223, 233, 210);
+    return phoneScreenTexture;
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 128;
@@ -717,6 +909,84 @@ function createBikeAccessories(bikeId: BikeId): THREE.Group {
   return group;
 }
 
+let cachedBrakeGlowTexture: THREE.DataTexture | null = null;
+
+function getBrakeGlowTexture(): THREE.DataTexture {
+  if (cachedBrakeGlowTexture) return cachedBrakeGlowTexture;
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = ((x + 0.5) / size) * 2 - 1;
+      const dy = ((y + 0.5) / size) * 2 - 1;
+      const r = Math.sqrt(dx * dx + dy * dy);
+      const falloff = Math.max(0, 1 - r);
+      const alpha = Math.pow(falloff, 2.0);
+      const idx = (y * size + x) * 4;
+      data[idx] = 255;
+      data[idx + 1] = Math.round(50 + 170 * Math.pow(falloff, 3.0));
+      data[idx + 2] = Math.round(35 + 120 * Math.pow(falloff, 3.8));
+      data[idx + 3] = Math.round(alpha * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  cachedBrakeGlowTexture = tex;
+  return tex;
+}
+
+function createBrakeLightGroup(bikeId: BikeId): THREE.Group {
+  const pos = BRAKE_LIGHT_POS[bikeId];
+  const group = new THREE.Group();
+  group.name = 'BrakeLight';
+  group.position.set(pos[0], pos[1], pos[2]);
+
+  const housingMat = new THREE.MeshStandardMaterial({
+    color: 0x1d1f22,
+    roughness: 0.52,
+    metalness: 0.35
+  });
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.068, 0.04), housingMat);
+  housing.name = 'BrakeHousing';
+  housing.position.z = -0.008;
+  housing.castShadow = true;
+  group.add(housing);
+
+  const lensMat = new THREE.MeshStandardMaterial({
+    color: 0x8f1010,
+    emissive: new THREE.Color(0xff1e1e),
+    emissiveIntensity: 0.45,
+    roughness: 0.2,
+    metalness: 0.08
+  });
+  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.132, 0.048, 0.024), lensMat);
+  lens.name = 'BrakeLens';
+  lens.position.z = 0.014;
+  group.add(lens);
+
+  const glowMat = new THREE.MeshBasicMaterial({
+    map: getBrakeGlowTexture(),
+    color: 0xff2424,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.25), glowMat);
+  glow.name = 'BrakeGlow';
+  glow.position.z = 0.032;
+  glow.renderOrder = 4;
+  glow.visible = false;
+  group.add(glow);
+
+  return group;
+}
+
 function attachRiderAndDeliveryBox(
   rootContainer: THREE.Group,
   bikeAssembly: THREE.Group,
@@ -730,6 +1000,7 @@ function attachRiderAndDeliveryBox(
   bikeAssembly.add(seatedRider);
   bikeAssembly.add(createDeliveryBox(bikeId));
   bikeAssembly.add(createBikeAccessories(bikeId));
+  bikeAssembly.add(createBrakeLightGroup(bikeId));
 
   const seatedRig = bindRiderRig(seatedRider);
   if (seatedRig) {
@@ -803,7 +1074,13 @@ export function createFallbackBike(bikeId: BikeId): THREE.Group {
   root.add(bikeAssembly);
 
   const bodyColor =
-    bikeId === 'honda' ? HANOI_PALETTE.terracottaRoof : HANOI_PALETTE.busBlue;
+    bikeId === 'honda'
+      ? HANOI_PALETTE.terracottaRoof
+      : bikeId === 'suzuki_rgv'
+        ? 0xc92a2a
+        : bikeId === 'suzuki_gsxs'
+          ? 0x0e4da4
+          : HANOI_PALETTE.busBlue;
   const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.45 });
   const darkMat = new THREE.MeshStandardMaterial({ color: 0x202428, roughness: 0.7 });
   const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd0d4d8, metalness: 0.6, roughness: 0.3 });
@@ -836,6 +1113,45 @@ export function createFallbackBike(bikeId: BikeId): THREE.Group {
   const seat = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.64), darkMat);
   seat.position.set(0, 0.76, 0.22);
   bikeAssembly.add(seat);
+
+  if (bikeId === 'suzuki_rgv') {
+    const exhaust = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.042, 0.062, 0.92, 10),
+      darkMat
+    );
+    exhaust.position.set(0.21, 0.34, 0.32);
+    exhaust.rotation.x = Math.PI / 2 - 0.22;
+    bikeAssembly.add(exhaust);
+
+    const silencer = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.036, 0.04, 0.22, 10),
+      chromeMat
+    );
+    silencer.position.set(0.21, 0.45, 0.8);
+    silencer.rotation.x = Math.PI / 2 - 0.22;
+    bikeAssembly.add(silencer);
+  } else if (bikeId === 'suzuki_gsxs') {
+    const tank = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.28, 0.56), bodyMat);
+    tank.position.set(0, 0.84, -0.14);
+    bikeAssembly.add(tank);
+
+    const cowl = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.28, 0.26), darkMat);
+    cowl.position.set(0, 0.92, -0.54);
+    cowl.rotation.x = 0.28;
+    bikeAssembly.add(cowl);
+
+    const bellyPan = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.58), bodyMat);
+    bellyPan.position.set(0, 0.34, -0.08);
+    bikeAssembly.add(bellyPan);
+
+    const sportPipe = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.06, 0.52, 10),
+      chromeMat
+    );
+    sportPipe.position.set(0.22, 0.38, 0.42);
+    sportPipe.rotation.x = Math.PI / 2 - 0.32;
+    bikeAssembly.add(sportPipe);
+  }
 
   attachRiderAndDeliveryBox(root, bikeAssembly, bikeId, null, null);
   return root;
@@ -883,6 +1199,16 @@ function normalizeBikeScene(
           stdMat.emissive.setHex(0x000000);
           stdMat.emissiveIntensity = 0;
           stdMat.envMapIntensity = 1.65;
+        } else if (bikeId === 'suzuki_gsxs') {
+          const matName = stdMat.name.toLowerCase();
+          if (matName.includes('kaca_lampu')) {
+            stdMat.emissive.setHex(0xfff4d6);
+            stdMat.emissiveIntensity = Math.max(stdMat.emissiveIntensity ?? 0, 0.95);
+          } else if (matName.includes('kaca_lcd')) {
+            stdMat.emissive.setHex(0x68d8ff);
+            stdMat.emissiveIntensity = Math.max(stdMat.emissiveIntensity ?? 0, 0.75);
+          }
+          stdMat.envMapIntensity = 1.5;
         } else {
           // Preserve GLB chrome & retro gloss so PMREM golden-hour reflections pop cleanly
           stdMat.envMapIntensity = 1.45;
@@ -925,7 +1251,7 @@ async function fetchBikeTemplate(bikeId: BikeId): Promise<THREE.Group> {
   const spec = BIKES[bikeId];
   try {
     const [gltf, seatedDriver, standingDriver] = await Promise.all([
-      gltfLoader.loadAsync(spec.modelPath),
+      getSharedBikeGltfLoader().loadAsync(spec.modelPath),
       getStandingDriverInstance(bikeId),
       getStandingDriverInstance(bikeId)
     ]);

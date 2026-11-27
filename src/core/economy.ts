@@ -81,8 +81,9 @@ export function applyStageReward(
   const diff = DIFFICULTIES[difficultyId];
   const validStage = STAGES.find((s) => s.id === stageId);
   const resolvedStageId = validStage ? validStage.id : stageId;
+  const rewardScale = validStage?.rewardScale ?? 1;
 
-  const baseReward = diff.stageReward;
+  const baseReward = Math.round(diff.stageReward * rewardScale);
   const cleanHits = Math.max(0, Math.floor(hitsInStage));
   const perfectBonus = cleanHits === 0 ? diff.perfectBonus : 0;
   const totalReward = baseReward + perfectBonus;

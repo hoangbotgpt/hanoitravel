@@ -3,7 +3,8 @@ import {
   BIKES,
   getStageSpec,
   type BikeId,
-  type BikeSpec
+  type BikeSpec,
+  type StageId
 } from '../config/gameConfig.ts';
 import {
   type CrashPhase,
@@ -24,7 +25,12 @@ import {
   getRoadSlope,
   getRoadTangentYaw
 } from '../core/roadMath.ts';
-import { extractBikeRig, type BikeRigHandles } from '../world/bikeLoader.ts';
+import {
+  extractBikeRig,
+  setBikeBrakeLight,
+  setBikeStoppedPose,
+  type BikeRigHandles
+} from '../world/bikeLoader.ts';
 import { findRiderRig, type RiderRig } from '../world/riderRig.ts';
 
 export interface PlayerInputState {
@@ -45,6 +51,7 @@ export interface PlayerPose {
   leanAngle: number;
   yaw: number;
   pitch: number;
+  isBraking: boolean;
 }
 
 const LATERAL_MARGIN = 0.9;
@@ -53,7 +60,7 @@ const BASE_CAMERA_FOV = 60;
 export class PlayerController {
   private bikeId: BikeId;
   private bikeSpec: BikeSpec;
-  private stageId: 1 | 2 | 3 = 1;
+  private stageId: StageId = 1;
 
   private distance = 0;
   private lateralOffset = 1.4;
@@ -82,6 +89,7 @@ export class PlayerController {
   private riderRig: RiderRig | null = null;
   private seatedRig: RiderRig | null = null;
   private crashHoldOnGameOver = false;
+  private brakeLightLit = false;
   private input: PlayerInputState = {
     left: false,
     right: false,
@@ -109,6 +117,9 @@ export class PlayerController {
       this.rigHandles.standingRider.position.set(0, 0, 0);
       this.rigHandles.standingRider.rotation.set(0, 0, 0);
     }
+    setBikeStoppedPose(this.rigHandles, false);
+    setBikeBrakeLight(this.rigHandles, false);
+    this.brakeLightLit = false;
   }
 
   public setBike(bikeId: BikeId, bikeMesh: THREE.Object3D | null): void {
@@ -127,7 +138,7 @@ export class PlayerController {
     this.resetRigVisuals();
   }
 
-  public setStage(stageId: 1 | 2 | 3): void {
+  public setStage(stageId: StageId): void {
     this.stageId = stageId;
   }
 
@@ -145,7 +156,8 @@ export class PlayerController {
     maxFov: number;
     latFollow: number;
   } {
-    if (this.stageId === 1) {
+    const laneCount = getStageSpec(this.stageId).laneCount;
+    if (laneCount === 2) {
       return {
         backDist: 4.05,
         camY: 1.88,
@@ -155,7 +167,7 @@ export class PlayerController {
         latFollow: 0.76
       };
     }
-    if (this.stageId === 3) {
+    if (laneCount === 6) {
       return {
         backDist: 4.65,
         camY: 2.28,
@@ -176,7 +188,7 @@ export class PlayerController {
   }
 
   public resetForStage(
-    stageId: 1 | 2 | 3,
+    stageId: StageId,
     camera?: THREE.PerspectiveCamera
   ): void {
     const stageSpec = getStageSpec(stageId);
@@ -207,6 +219,20 @@ export class PlayerController {
     this.input.right = false;
     this.input.accelerate = false;
     this.input.brake = false;
+    this.setBrakeLightLit(false);
+  }
+
+  public isBraking(): boolean {
+    return this.crashState.phase === 'riding' && this.input.brake;
+  }
+
+  public isBrakeLightLit(): boolean {
+    return this.brakeLightLit;
+  }
+
+  public setBrakeLightLit(lit: boolean): void {
+    this.brakeLightLit = lit;
+    setBikeBrakeLight(this.rigHandles, lit);
   }
 
   public handleKeyDown(code: string): boolean {
@@ -380,40 +406,59 @@ export class PlayerController {
 
     const spec = this.bikeSpec;
 
-    // 1. Longitudinal speed physics (W/Up accelerates, S/Down brakes, otherwise relaxed cruise)
-    const minActiveSpeed = spec.minCruiseSpeed * 0.65;
+    // 1. Longitudinal speed physics (W/Up accelerates, S/Down brakes smoothly to 0 km/h, otherwise coast)
     const cruiseTarget = spec.minCruiseSpeed + 6;
     const slope = getRoadSlope(this.stageId, this.distance);
 
     if (this.input.accelerate && !this.input.brake) {
       this.speed += spec.accel * safeDt;
+      this.speed -= slope * 9.0 * safeDt;
     } else if (this.input.brake) {
       this.speed -= spec.brakeDecel * safeDt;
+      // Ignore downhill/slope rollback when stopped or nearly stopped under brake
+      if (this.speed > 0.5) {
+        this.speed -= slope * 9.0 * safeDt;
+      }
+      if (this.speed < 0.05) {
+        this.speed = 0;
+      }
     } else {
-      // Gentle coasting toward relaxed cruise speed
+      // Gentle coasting toward relaxed cruise speed (accelerates smoothly from 0 after releasing brake)
       const coastRate = this.speed > cruiseTarget ? 10 : 16;
       const diff = cruiseTarget - this.speed;
       this.speed += Math.sign(diff) * Math.min(Math.abs(diff), coastRate * safeDt);
+      if (this.speed > 0.5) {
+        this.speed -= slope * 9.0 * safeDt;
+      }
     }
 
-    // Subtle incline feedback on Stage 3 overpass
-    this.speed -= slope * 9.0 * safeDt;
-    this.speed = Math.max(
-      this.input.brake ? minActiveSpeed : spec.minCruiseSpeed,
-      Math.min(spec.maxSpeed, this.speed)
-    );
+    this.speed = Math.max(0, Math.min(spec.maxSpeed, this.speed));
 
     // 2. Advance linearly along spline distance (A -> B)
     this.distance = Math.min(stageLength, this.distance + this.speed * safeDt);
 
     // 3. Lateral lane-weaving physics with speed-sensitive steering & smooth motorbike lean
-    const steerDir = (this.input.right ? 1 : 0) - (this.input.left ? 1 : 0);
-    const speedRatio = Math.max(0.25, Math.min(1, this.speed / spec.maxSpeed));
-    const targetLateralVel = steerDir * spec.handling * (0.55 + 0.45 * speedRatio);
-    const lateralLerp = 1 - Math.exp(-11 * safeDt);
-    this.lateralVelocity += (targetLateralVel - this.lateralVelocity) * lateralLerp;
-
     const maxLat = this.getMaxLateralOffset();
+    if (this.speed < 0.5) {
+      // Stopped at red light / obstacle: stabilize steering & upright balance
+      const stopDamp = 1 - Math.exp(-14 * safeDt);
+      this.lateralVelocity += (0 - this.lateralVelocity) * stopDamp;
+      if (Math.abs(this.lateralVelocity) < 0.01) this.lateralVelocity = 0;
+      this.leanAngle += (0 - this.leanAngle) * stopDamp;
+      if (Math.abs(this.leanAngle) < 0.002) this.leanAngle = 0;
+    } else {
+      const steerDir = (this.input.right ? 1 : 0) - (this.input.left ? 1 : 0);
+      const speedRatio = Math.max(0.25, Math.min(1, this.speed / spec.maxSpeed));
+      const targetLateralVel = steerDir * spec.handling * (0.55 + 0.45 * speedRatio);
+      const lateralLerp = 1 - Math.exp(-11 * safeDt);
+      this.lateralVelocity += (targetLateralVel - this.lateralVelocity) * lateralLerp;
+
+      // Lean into turn: steering right (+X) tilts bike right (negative Z rotation)
+      const targetLean = -steerDir * spec.leanMax * (0.6 + 0.4 * speedRatio);
+      const leanLerp = 1 - Math.exp(-10 * safeDt);
+      this.leanAngle += (targetLean - this.leanAngle) * leanLerp;
+    }
+
     this.lateralOffset += this.lateralVelocity * safeDt;
     if (this.lateralOffset > maxLat) {
       this.lateralOffset = maxLat;
@@ -423,12 +468,7 @@ export class PlayerController {
       this.lateralVelocity = Math.max(0, this.lateralVelocity);
     }
 
-    // Lean into turn: steering right (+X) tilts bike right (negative Z rotation)
-    const targetLean = -steerDir * spec.leanMax * (0.6 + 0.4 * speedRatio);
-    const leanLerp = 1 - Math.exp(-10 * safeDt);
-    this.leanAngle += (targetLean - this.leanAngle) * leanLerp;
-
-    // 4. Sync 3D bike transform & invulnerability blink feedback
+    // 4. Sync 3D bike transform, stopped pose, brake light & invulnerability blink feedback
     const pose = this.syncBikeTransform();
 
     if (this.bikeGroup) {
@@ -462,9 +502,16 @@ export class PlayerController {
       this.bikeGroup.rotation.set(pitch, yaw, this.leanAngle);
     }
 
-    const displayKmh = Math.round(
-      (this.speed / this.bikeSpec.maxSpeed) * this.bikeSpec.displayMaxKmh
-    );
+    const brakingActive = this.crashState.phase === 'riding' && this.input.brake;
+    const stoppedActive = this.crashState.phase === 'riding' && this.speed < 0.5;
+    this.brakeLightLit = brakingActive;
+    setBikeBrakeLight(this.rigHandles, brakingActive);
+    setBikeStoppedPose(this.rigHandles, stoppedActive);
+
+    const displayKmh =
+      this.speed < 0.05
+        ? 0
+        : Math.round((this.speed / this.bikeSpec.maxSpeed) * this.bikeSpec.displayMaxKmh);
 
     return {
       distance: this.distance,
@@ -476,7 +523,8 @@ export class PlayerController {
       displayKmh,
       leanAngle: this.leanAngle,
       yaw,
-      pitch
+      pitch,
+      isBraking: brakingActive
     };
   }
 
@@ -637,6 +685,10 @@ export class PlayerController {
       }
     }
 
+    this.brakeLightLit = false;
+    setBikeBrakeLight(this.rigHandles, false);
+    setBikeStoppedPose(this.rigHandles, false);
+
     return {
       distance: clampedDist,
       lateralOffset: visual.bikeLateral,
@@ -647,7 +699,8 @@ export class PlayerController {
       displayKmh: 0,
       leanAngle: visual.bikeRoll,
       yaw: tangentYaw + visual.bikeYawOffset,
-      pitch
+      pitch,
+      isBraking: false
     };
   }
 
